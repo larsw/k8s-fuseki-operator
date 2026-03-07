@@ -260,7 +260,9 @@ type SecurityProfileSpec struct {
 }
 
 type SecurityProfileStatus struct {
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	Phase              string             `json:"phase,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

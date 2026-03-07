@@ -1,0 +1,10 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: SecurityProfile
+metadata:
+  name: example-securityprofile
+spec:
+  adminCredentialsSecretRef:
+    name: example-admin-secret
+  tlsSecretRef:
+    name: example-tls-secret
+  oidcIssuerURL: https://issuer.example.com

@@ -96,6 +96,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&fusekicontroller.SecurityProfileReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create controller", "controller", "SecurityProfile")
+		os.Exit(1)
+	}
+
 	ctrl.Log.WithName("setup").Info("starting manager", "version", version.String())
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		ctrl.Log.WithName("setup").Error(err, "manager exited")

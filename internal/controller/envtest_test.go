@@ -162,6 +162,59 @@ func TestEnvtestFusekiClusterLeaseFailover(t *testing.T) {
 	}
 }
 
+func TestEnvtestSecurityProfileStatusTransitions(t *testing.T) {
+	t.Helper()
+
+	ctx := context.Background()
+	_, client, scheme := startEnvtestClient(t)
+
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "envtest-security"}}
+	if err := client.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	profile := &fusekiv1alpha1.SecurityProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "admin-auth", Namespace: namespace.Name},
+		Spec: fusekiv1alpha1.SecurityProfileSpec{
+			AdminCredentialsSecretRef: &corev1.LocalObjectReference{Name: "admin-secret"},
+			TLSSecretRef:              &corev1.LocalObjectReference{Name: "tls-secret"},
+		},
+	}
+	if err := client.Create(ctx, profile); err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+
+	reconciler := &SecurityProfileReconciler{Client: client, Scheme: scheme}
+	if _, err := reconciler.Reconcile(ctx, reconcileRequest(profile)); err != nil {
+		t.Fatalf("reconcile pending profile: %v", err)
+	}
+
+	updated := &fusekiv1alpha1.SecurityProfile{}
+	if err := client.Get(ctx, objectKey(namespace.Name, profile.Name), updated); err != nil {
+		t.Fatalf("get pending profile: %v", err)
+	}
+	if updated.Status.Phase != "Pending" {
+		t.Fatalf("unexpected pending phase: %q", updated.Status.Phase)
+	}
+
+	for _, secretName := range []string{"admin-secret", "tls-secret"} {
+		if err := client.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace.Name}}); err != nil {
+			t.Fatalf("create secret %s: %v", secretName, err)
+		}
+	}
+
+	if _, err := reconciler.Reconcile(ctx, reconcileRequest(profile)); err != nil {
+		t.Fatalf("reconcile ready profile: %v", err)
+	}
+
+	if err := client.Get(ctx, objectKey(namespace.Name, profile.Name), updated); err != nil {
+		t.Fatalf("get ready profile: %v", err)
+	}
+	if updated.Status.Phase != "Ready" {
+		t.Fatalf("unexpected ready phase: %q", updated.Status.Phase)
+	}
+}
+
 func startEnvtestClient(t *testing.T) (*envtest.Environment, ctrlclient.Client, *runtime.Scheme) {
 	t.Helper()
 
