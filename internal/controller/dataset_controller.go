@@ -161,19 +161,22 @@ func reconcileDatasetBootstrapJob(ctx context.Context, c client.Client, scheme *
 	jobName := datasetBootstrapJobName(target, dataset.Name)
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: owner.GetNamespace()}}
 	_, err := controllerutil.CreateOrUpdate(ctx, c, job, func() error {
-		job.Labels = mergeStringMaps(ownerLabels, map[string]string{
+		desiredLabels := mergeStringMaps(ownerLabels, map[string]string{
 			"fuseki.apache.org/component":    "dataset-bootstrap",
 			"fuseki.apache.org/dataset":      dataset.Name,
 			"fuseki.apache.org/dataset-name": dataset.Spec.Name,
 		})
-		job.Spec.BackoffLimit = ptrTo(int32(3))
-		job.Spec.Template.ObjectMeta.Labels = mergeStringMaps(job.Labels, map[string]string{"job-name": jobName})
-		job.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyOnFailure
-		job.Spec.Template.Spec.Containers = []corev1.Container{datasetBootstrapContainer(dataset, target, securityProfile, adminSecretRef)}
-		job.Spec.Template.Spec.Volumes = []corev1.Volume{{
-			Name:         datasetConfigVolumeName,
-			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: dataset.ConfigMapName()}}},
-		}}
+		job.Labels = desiredLabels
+		if job.CreationTimestamp.IsZero() {
+			job.Spec.BackoffLimit = ptrTo(int32(3))
+			job.Spec.Template.ObjectMeta.Labels = mergeStringMaps(desiredLabels, map[string]string{"job-name": jobName})
+			job.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyOnFailure
+			job.Spec.Template.Spec.Containers = []corev1.Container{datasetBootstrapContainer(dataset, target, securityProfile, adminSecretRef)}
+			job.Spec.Template.Spec.Volumes = []corev1.Volume{{
+				Name:         datasetConfigVolumeName,
+				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: dataset.ConfigMapName()}}},
+			}}
+		}
 		return controllerutil.SetControllerReference(owner, job, scheme)
 	})
 	return err
