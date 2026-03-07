@@ -36,9 +36,14 @@ func TestFusekiClusterReconcileCreatesBaseResources(t *testing.T) {
 	}
 	profile := &fusekiv1alpha1.SecurityProfile{
 		ObjectMeta: metav1.ObjectMeta{Name: "admin-auth", Namespace: "default"},
-		Spec:       fusekiv1alpha1.SecurityProfileSpec{AdminCredentialsSecretRef: &corev1.LocalObjectReference{Name: "admin-secret"}},
+		Spec: fusekiv1alpha1.SecurityProfileSpec{
+			AdminCredentialsSecretRef: &corev1.LocalObjectReference{Name: "admin-secret"},
+			TLSSecretRef:              &corev1.LocalObjectReference{Name: "tls-secret"},
+			OIDCIssuerURL:             "https://dex.example.com/dex",
+		},
 	}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "admin-secret", Namespace: "default"}}
+	tlsSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "tls-secret", Namespace: "default"}, Type: corev1.SecretTypeTLS, Data: map[string][]byte{corev1.TLSCertKey: []byte("cert"), corev1.TLSPrivateKeyKey: []byte("key")}}
 
 	dataset := &fusekiv1alpha1.Dataset{
 		ObjectMeta: metav1.ObjectMeta{Name: "dataset-a", Namespace: "default"},
@@ -70,7 +75,7 @@ func TestFusekiClusterReconcileCreatesBaseResources(t *testing.T) {
 		WithStatusSubresource(&fusekiv1alpha1.Dataset{}).
 		WithStatusSubresource(&fusekiv1alpha1.SecurityProfile{}).
 		WithStatusSubresource(&fusekiv1alpha1.FusekiCluster{}).
-		WithObjects(cluster, pod, dataset, profile, secret).
+		WithObjects(cluster, pod, dataset, profile, secret, tlsSecret).
 		Build()
 
 	securityReconciler := &SecurityProfileReconciler{Client: k8sClient, Scheme: scheme}
@@ -132,6 +137,9 @@ func TestFusekiClusterReconcileCreatesBaseResources(t *testing.T) {
 	if headlessService.Spec.ClusterIP != corev1.ClusterIPNone {
 		t.Fatalf("expected headless service, got clusterIP=%q", headlessService.Spec.ClusterIP)
 	}
+	if got := headlessService.Spec.Ports[0].Name; got != "https" {
+		t.Fatalf("unexpected headless service port name: %q", got)
+	}
 
 	statefulSet := &appsv1.StatefulSet{}
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "example"}, statefulSet); err != nil {
@@ -157,15 +165,57 @@ func TestFusekiClusterReconcileCreatesBaseResources(t *testing.T) {
 	if got := envVarValue(statefulSet.Spec.Template.Spec.Containers[0].Env, "FUSEKI_DATASET_CONFIG_DIR"); got != "" {
 		t.Fatalf("expected no legacy dataset config dir env var, got %q", got)
 	}
+	if got := envVarValue(statefulSet.Spec.Template.Spec.Containers[0].Env, "SECURITY_PROFILE_OIDC_ISSUER"); got != "https://dex.example.com/dex" {
+		t.Fatalf("unexpected OIDC issuer env var: %q", got)
+	}
+	if got := envVarValue(statefulSet.Spec.Template.Spec.Containers[0].Env, "FUSEKI_SERVER_SCHEME"); got != "https" {
+		t.Fatalf("unexpected server scheme env var: %q", got)
+	}
+	if got := envVarValue(statefulSet.Spec.Template.Spec.Containers[0].Env, "SECURITY_PROFILE_TLS_SECRET"); got != "tls-secret" {
+		t.Fatalf("unexpected TLS secret env var: %q", got)
+	}
+	if got := envVarValue(statefulSet.Spec.Template.Spec.Containers[0].Env, "SECURITY_PROFILE_TLS_CERT_FILE"); got != securityTLSCertFile {
+		t.Fatalf("unexpected TLS cert env var: %q", got)
+	}
+	if got := envVarValue(statefulSet.Spec.Template.Spec.Containers[0].Env, "SECURITY_PROFILE_TLS_KEY_FILE"); got != securityTLSKeyFile {
+		t.Fatalf("unexpected TLS key env var: %q", got)
+	}
 	if secretName := envVarSecretRefName(statefulSet.Spec.Template.Spec.Containers[0].Env, "ADMIN_PASSWORD"); secretName != "admin-secret" {
 		t.Fatalf("unexpected statefulset admin password secret: %q", secretName)
+	}
+	if mountPath := volumeMountPath(statefulSet.Spec.Template.Spec.Containers[0].VolumeMounts, securityConfigVolumeName); mountPath != "/fuseki-extra/security" {
+		t.Fatalf("unexpected security config mount: %q", mountPath)
+	}
+	if mountPath := volumeMountPath(statefulSet.Spec.Template.Spec.Containers[0].VolumeMounts, securityTLSVolumeName); mountPath != securityTLSMountPath {
+		t.Fatalf("unexpected security TLS mount: %q", mountPath)
+	}
+	if configMapName := configMapVolumeName(statefulSet.Spec.Template.Spec.Volumes, securityConfigVolumeName); configMapName != "admin-auth-security" {
+		t.Fatalf("unexpected security config volume source: %q", configMapName)
+	}
+	if secretName := secretVolumeName(statefulSet.Spec.Template.Spec.Volumes, securityTLSVolumeName); secretName != "tls-secret" {
+		t.Fatalf("unexpected security TLS volume source: %q", secretName)
+	}
+	for probeName, probe := range map[string]*corev1.Probe{
+		"startup":   statefulSet.Spec.Template.Spec.Containers[0].StartupProbe,
+		"readiness": statefulSet.Spec.Template.Spec.Containers[0].ReadinessProbe,
+		"liveness":  statefulSet.Spec.Template.Spec.Containers[0].LivenessProbe,
+	} {
+		if probe.HTTPGet != nil {
+			t.Fatalf("expected %s probe to use exec for TLS, got httpGet", probeName)
+		}
+		if probe.Exec == nil || len(probe.Exec.Command) != 3 {
+			t.Fatalf("expected %s probe exec command, got %#v", probeName, probe.Exec)
+		}
+		if got := probe.Exec.Command[2]; got != "curl --silent --show-error --fail --insecure https://127.0.0.1:3030/$/ping >/dev/null" {
+			t.Fatalf("unexpected %s probe command: %q", probeName, got)
+		}
 	}
 
 	job := &batchv1.Job{}
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "cluster-example-dataset-a-bootstrap"}, job); err != nil {
 		t.Fatalf("get bootstrap job: %v", err)
 	}
-	if got := envVarValue(job.Spec.Template.Spec.Containers[0].Env, "FUSEKI_WRITE_URL"); got != "http://example-write:3030" {
+	if got := envVarValue(job.Spec.Template.Spec.Containers[0].Env, "FUSEKI_WRITE_URL"); got != "https://example-write:3030" {
 		t.Fatalf("unexpected job write url: %q", got)
 	}
 

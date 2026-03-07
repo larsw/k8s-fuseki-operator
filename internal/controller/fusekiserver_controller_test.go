@@ -48,16 +48,21 @@ func TestFusekiServerReconcileCreatesBaseResources(t *testing.T) {
 	}
 	profile := &fusekiv1alpha1.SecurityProfile{
 		ObjectMeta: metav1.ObjectMeta{Name: "admin-auth", Namespace: "default"},
-		Spec:       fusekiv1alpha1.SecurityProfileSpec{AdminCredentialsSecretRef: &corev1.LocalObjectReference{Name: "admin-secret"}},
+		Spec: fusekiv1alpha1.SecurityProfileSpec{
+			AdminCredentialsSecretRef: &corev1.LocalObjectReference{Name: "admin-secret"},
+			TLSSecretRef:              &corev1.LocalObjectReference{Name: "tls-secret"},
+			OIDCIssuerURL:             "https://dex.example.com/dex",
+		},
 	}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "admin-secret", Namespace: "default"}}
+	tlsSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "tls-secret", Namespace: "default"}, Type: corev1.SecretTypeTLS, Data: map[string][]byte{corev1.TLSCertKey: []byte("cert"), corev1.TLSPrivateKeyKey: []byte("key")}}
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&fusekiv1alpha1.Dataset{}).
 		WithStatusSubresource(&fusekiv1alpha1.SecurityProfile{}).
 		WithStatusSubresource(&fusekiv1alpha1.FusekiServer{}).
-		WithObjects(server, dataset, profile, secret).
+		WithObjects(server, dataset, profile, secret, tlsSecret).
 		Build()
 
 	securityReconciler := &SecurityProfileReconciler{Client: k8sClient, Scheme: scheme}
@@ -82,6 +87,12 @@ func TestFusekiServerReconcileCreatesBaseResources(t *testing.T) {
 	if got := configMap.Data["mode"]; got != "single-server" {
 		t.Fatalf("unexpected mode: %q", got)
 	}
+	if got := configMap.Data["run-fuseki.sh"]; !containsLine(got, "  exec \"${JAVA_HOME}/bin/java\" -cp /opt/fuseki/fuseki-server.jar:/opt/fuseki/fuseki-operator-launcher.jar FusekiHttpsLauncher --https=\"${https_config}\" --httpsPort ${FUSEKI_PORT:-3030}") {
+		t.Fatalf("unexpected TLS startup script: %q", got)
+	}
+	if got := configMap.Data["run-fuseki.sh"]; !containsLine(got, "  rm -f \"${FUSEKI_BASE}/shiro.ini\"") {
+		t.Fatalf("expected TLS startup script to disable shiro: %q", got)
+	}
 
 	service := &corev1.Service{}
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "standalone"}, service); err != nil {
@@ -89,6 +100,9 @@ func TestFusekiServerReconcileCreatesBaseResources(t *testing.T) {
 	}
 	if got := service.Spec.Ports[0].Port; got != 3030 {
 		t.Fatalf("unexpected service port: %d", got)
+	}
+	if got := service.Spec.Ports[0].Name; got != "https" {
+		t.Fatalf("unexpected service port name: %q", got)
 	}
 
 	pvc := &corev1.PersistentVolumeClaim{}
@@ -106,15 +120,57 @@ func TestFusekiServerReconcileCreatesBaseResources(t *testing.T) {
 	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "FUSEKI_DATASET_CONFIG_DIR"); got != "" {
 		t.Fatalf("expected no legacy dataset config dir env var, got %q", got)
 	}
+	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "SECURITY_PROFILE_OIDC_ISSUER"); got != "https://dex.example.com/dex" {
+		t.Fatalf("unexpected OIDC issuer env var: %q", got)
+	}
+	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "FUSEKI_SERVER_SCHEME"); got != "https" {
+		t.Fatalf("unexpected server scheme env var: %q", got)
+	}
+	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "SECURITY_PROFILE_TLS_SECRET"); got != "tls-secret" {
+		t.Fatalf("unexpected TLS secret env var: %q", got)
+	}
+	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "SECURITY_PROFILE_TLS_CERT_FILE"); got != securityTLSCertFile {
+		t.Fatalf("unexpected TLS cert env var: %q", got)
+	}
+	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "SECURITY_PROFILE_TLS_KEY_FILE"); got != securityTLSKeyFile {
+		t.Fatalf("unexpected TLS key env var: %q", got)
+	}
 	if secretName := envVarSecretRefName(deployment.Spec.Template.Spec.Containers[0].Env, "ADMIN_PASSWORD"); secretName != "admin-secret" {
 		t.Fatalf("unexpected deployment admin password secret: %q", secretName)
+	}
+	if mountPath := volumeMountPath(deployment.Spec.Template.Spec.Containers[0].VolumeMounts, securityConfigVolumeName); mountPath != "/fuseki-extra/security" {
+		t.Fatalf("unexpected security config mount: %q", mountPath)
+	}
+	if mountPath := volumeMountPath(deployment.Spec.Template.Spec.Containers[0].VolumeMounts, securityTLSVolumeName); mountPath != securityTLSMountPath {
+		t.Fatalf("unexpected security TLS mount: %q", mountPath)
+	}
+	if configMapName := configMapVolumeName(deployment.Spec.Template.Spec.Volumes, securityConfigVolumeName); configMapName != "admin-auth-security" {
+		t.Fatalf("unexpected security config volume source: %q", configMapName)
+	}
+	if secretName := secretVolumeName(deployment.Spec.Template.Spec.Volumes, securityTLSVolumeName); secretName != "tls-secret" {
+		t.Fatalf("unexpected security TLS volume source: %q", secretName)
+	}
+	for probeName, probe := range map[string]*corev1.Probe{
+		"startup":   deployment.Spec.Template.Spec.Containers[0].StartupProbe,
+		"readiness": deployment.Spec.Template.Spec.Containers[0].ReadinessProbe,
+		"liveness":  deployment.Spec.Template.Spec.Containers[0].LivenessProbe,
+	} {
+		if probe.HTTPGet != nil {
+			t.Fatalf("expected %s probe to use exec for TLS, got httpGet", probeName)
+		}
+		if probe.Exec == nil || len(probe.Exec.Command) != 3 {
+			t.Fatalf("expected %s probe exec command, got %#v", probeName, probe.Exec)
+		}
+		if got := probe.Exec.Command[2]; got != "curl --silent --show-error --fail --insecure https://127.0.0.1:3030/$/ping >/dev/null" {
+			t.Fatalf("unexpected %s probe command: %q", probeName, got)
+		}
 	}
 
 	job := &batchv1.Job{}
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "server-standalone-dataset-a-bootstrap"}, job); err != nil {
 		t.Fatalf("get bootstrap job: %v", err)
 	}
-	if got := envVarValue(job.Spec.Template.Spec.Containers[0].Env, "FUSEKI_WRITE_URL"); got != "http://standalone:3030" {
+	if got := envVarValue(job.Spec.Template.Spec.Containers[0].Env, "FUSEKI_WRITE_URL"); got != "https://standalone:3030" {
 		t.Fatalf("unexpected job write url: %q", got)
 	}
 

@@ -43,21 +43,21 @@ func (r *FusekiServerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.reconcileConfigMap(ctx, &server); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.reconcileService(ctx, &server); err != nil {
+	securityStatus, err := resolveSecurityDependency(ctx, r.Client, server.Namespace, server.Spec.SecurityProfileRef)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcileService(ctx, &server, securityStatus.Profile); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.reconcilePVC(ctx, &server); err != nil {
-		return ctrl.Result{}, err
-	}
-	securityStatus, err := resolveSecurityDependency(ctx, r.Client, server.Namespace, server.Spec.SecurityProfileRef)
-	if err != nil {
 		return ctrl.Result{}, err
 	}
 	observabilityStatus, err := r.reconcileObservability(ctx, &server)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	deployment, err := r.reconcileDeployment(ctx, &server, securityStatus.AdminSecretRef)
+	deployment, err := r.reconcileDeployment(ctx, &server, securityStatus.Profile, securityStatus.AdminSecretRef)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -157,7 +157,7 @@ func (r *FusekiServerReconciler) reconcileConfigMap(ctx context.Context, server 
 	return err
 }
 
-func (r *FusekiServerReconciler) reconcileService(ctx context.Context, server *fusekiv1alpha1.FusekiServer) error {
+func (r *FusekiServerReconciler) reconcileService(ctx context.Context, server *fusekiv1alpha1.FusekiServer, securityProfile *fusekiv1alpha1.SecurityProfile) error {
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: server.ServiceName(), Namespace: server.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
 		svc.Labels = mergeStringMaps(fusekiServerLabels(server), map[string]string{"fuseki.apache.org/service-role": "server"})
@@ -165,7 +165,7 @@ func (r *FusekiServerReconciler) reconcileService(ctx context.Context, server *f
 		svc.Spec.Type = server.DesiredServiceType()
 		svc.Spec.Selector = fusekiServerSelectorLabels(server)
 		svc.Spec.Ports = []corev1.ServicePort{{
-			Name:       "http",
+			Name:       fusekiServicePortName(securityProfile),
 			Port:       server.DesiredHTTPPort(),
 			Protocol:   corev1.ProtocolTCP,
 			TargetPort: intstr.FromInt32(server.DesiredHTTPPort()),
@@ -189,7 +189,7 @@ func (r *FusekiServerReconciler) reconcilePVC(ctx context.Context, server *fusek
 	return err
 }
 
-func (r *FusekiServerReconciler) reconcileDeployment(ctx context.Context, server *fusekiv1alpha1.FusekiServer, adminSecretRef *corev1.LocalObjectReference) (*appsv1.Deployment, error) {
+func (r *FusekiServerReconciler) reconcileDeployment(ctx context.Context, server *fusekiv1alpha1.FusekiServer, securityProfile *fusekiv1alpha1.SecurityProfile, adminSecretRef *corev1.LocalObjectReference) (*appsv1.Deployment, error) {
 	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: server.DeploymentName(), Namespace: server.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
 		deployment.Labels = mergeStringMaps(fusekiServerLabels(server), map[string]string{"fuseki.apache.org/component": "server"})
@@ -200,8 +200,8 @@ func (r *FusekiServerReconciler) reconcileDeployment(ctx context.Context, server
 			deployment.Spec.Template.ObjectMeta.Annotations = mergeStringMaps(nil, server.Spec.Observability.Logging.PodAnnotations)
 		}
 		deployment.Spec.Template.Spec.TerminationGracePeriodSeconds = ptrTo(int64(30))
-		deployment.Spec.Template.Spec.Containers = []corev1.Container{fusekiServerContainer(server, adminSecretRef)}
-		deployment.Spec.Template.Spec.Volumes = []corev1.Volume{
+		deployment.Spec.Template.Spec.Containers = []corev1.Container{fusekiServerContainer(server, securityProfile, adminSecretRef)}
+		volumes := []corev1.Volume{
 			{
 				Name:         fusekiConfigVolumeName,
 				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: server.ConfigMapName()}}},
@@ -212,6 +212,13 @@ func (r *FusekiServerReconciler) reconcileDeployment(ctx context.Context, server
 				VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: server.PersistentVolumeClaimName()}},
 			},
 		}
+		if securityVolume := fusekiSecurityConfigVolume(securityProfile); securityVolume != nil {
+			volumes = append(volumes, *securityVolume)
+		}
+		if tlsVolume := fusekiSecurityTLSVolume(securityProfile); tlsVolume != nil {
+			volumes = append(volumes, *tlsVolume)
+		}
+		deployment.Spec.Template.Spec.Volumes = volumes
 		return controllerutil.SetControllerReference(server, deployment, r.Scheme)
 	})
 	return deployment, err
@@ -277,13 +284,25 @@ func fusekiServerSelectorLabels(server *fusekiv1alpha1.FusekiServer) map[string]
 	}
 }
 
-func fusekiServerContainer(server *fusekiv1alpha1.FusekiServer, adminSecretRef *corev1.LocalObjectReference) corev1.Container {
+func fusekiServerContainer(server *fusekiv1alpha1.FusekiServer, securityProfile *fusekiv1alpha1.SecurityProfile, adminSecretRef *corev1.LocalObjectReference) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "FUSEKI_BASE", Value: fusekiv1alpha1.DefaultFusekiDataMountPath},
 		{Name: "FUSEKI_PORT", Value: fmt.Sprintf("%d", server.DesiredHTTPPort())},
 		{Name: "FUSEKI_OPERATOR_CONFIG", Value: "/fuseki-extra/operator-config"},
 	}
+	env = append(env, fusekiSecurityEnvVars(securityProfile)...)
 	env = append(env, fusekiAdminEnvVars(adminSecretRef)...)
+	volumeMounts := []corev1.VolumeMount{
+		{Name: fusekiDataVolumeName, MountPath: fusekiv1alpha1.DefaultFusekiDataMountPath},
+		{Name: fusekiConfigVolumeName, MountPath: "/fuseki-extra/operator-config", ReadOnly: true},
+		{Name: datasetConfigVolumeName, MountPath: "/fuseki-extra/dataset-config", ReadOnly: true},
+	}
+	if securityMount := fusekiSecurityConfigVolumeMount(securityProfile); securityMount != nil {
+		volumeMounts = append(volumeMounts, *securityMount)
+	}
+	if tlsMount := fusekiSecurityTLSVolumeMount(securityProfile); tlsMount != nil {
+		volumeMounts = append(volumeMounts, *tlsMount)
+	}
 
 	return corev1.Container{
 		Name:            "fuseki",
@@ -291,19 +310,15 @@ func fusekiServerContainer(server *fusekiv1alpha1.FusekiServer, adminSecretRef *
 		ImagePullPolicy: server.DesiredImagePullPolicy(),
 		Args:            []string{"/bin/sh", "/fuseki-extra/operator-config/run-fuseki.sh"},
 		Ports: []corev1.ContainerPort{{
-			Name:          "http",
+			Name:          fusekiServicePortName(securityProfile),
 			ContainerPort: server.DesiredHTTPPort(),
 			Protocol:      corev1.ProtocolTCP,
 		}},
-		Env:       env,
-		Resources: server.Spec.Resources,
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: fusekiDataVolumeName, MountPath: fusekiv1alpha1.DefaultFusekiDataMountPath},
-			{Name: fusekiConfigVolumeName, MountPath: "/fuseki-extra/operator-config", ReadOnly: true},
-			{Name: datasetConfigVolumeName, MountPath: "/fuseki-extra/dataset-config", ReadOnly: true},
-		},
-		StartupProbe:   &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/$/ping", Port: intstr.FromInt32(server.DesiredHTTPPort())}}, FailureThreshold: 30, PeriodSeconds: 5, InitialDelaySeconds: 5},
-		ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/$/ping", Port: intstr.FromInt32(server.DesiredHTTPPort())}}, PeriodSeconds: 5, InitialDelaySeconds: 10},
-		LivenessProbe:  &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/$/ping", Port: intstr.FromInt32(server.DesiredHTTPPort())}}, PeriodSeconds: 10, InitialDelaySeconds: 15},
+		Env:            env,
+		Resources:      server.Spec.Resources,
+		VolumeMounts:   volumeMounts,
+		StartupProbe:   fusekiStartupProbe(securityProfile, server.DesiredHTTPPort()),
+		ReadinessProbe: fusekiReadinessProbe(securityProfile, server.DesiredHTTPPort()),
+		LivenessProbe:  fusekiLivenessProbe(securityProfile, server.DesiredHTTPPort()),
 	}
 }

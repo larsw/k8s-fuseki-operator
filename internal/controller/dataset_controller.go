@@ -138,6 +138,7 @@ func reconcileDatasetBootstrapJobs(ctx context.Context, c client.Client, scheme 
 	if err != nil {
 		return err
 	}
+	target.WriteURL = secureServiceURL(target.WriteURL, securityProfile)
 
 	for _, ref := range datasetRefs {
 		if ref.Name == "" {
@@ -172,10 +173,17 @@ func reconcileDatasetBootstrapJob(ctx context.Context, c client.Client, scheme *
 			job.Spec.Template.ObjectMeta.Labels = mergeStringMaps(desiredLabels, map[string]string{"job-name": jobName})
 			job.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyOnFailure
 			job.Spec.Template.Spec.Containers = []corev1.Container{datasetBootstrapContainer(dataset, target, securityProfile, adminSecretRef)}
-			job.Spec.Template.Spec.Volumes = []corev1.Volume{{
+			volumes := []corev1.Volume{{
 				Name:         datasetConfigVolumeName,
 				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: dataset.ConfigMapName()}}},
 			}}
+			if securityVolume := fusekiSecurityConfigVolume(securityProfile); securityVolume != nil {
+				volumes = append(volumes, *securityVolume)
+			}
+			if tlsVolume := fusekiSecurityTLSVolume(securityProfile); tlsVolume != nil {
+				volumes = append(volumes, *tlsVolume)
+			}
+			job.Spec.Template.Spec.Volumes = volumes
 		}
 		return controllerutil.SetControllerReference(owner, job, scheme)
 	})
@@ -189,11 +197,26 @@ func datasetBootstrapJobName(target datasetBootstrapTarget, datasetName string) 
 func datasetBootstrapContainer(dataset *fusekiv1alpha1.Dataset, target datasetBootstrapTarget, securityProfile *fusekiv1alpha1.SecurityProfile, adminSecretRef *corev1.LocalObjectReference) corev1.Container {
 	script := strings.Join([]string{
 		"set -eu",
+		"curl_fuseki() {",
+		"  if [ -n \"${SECURITY_PROFILE_TLS_CA_FILE:-}\" ] && [ -f \"${SECURITY_PROFILE_TLS_CA_FILE}\" ]; then",
+		"    curl --cacert \"${SECURITY_PROFILE_TLS_CA_FILE}\" \"$@\"",
+		"    return",
+		"  fi",
+		"  if [ -n \"${SECURITY_PROFILE_TLS_CERT_FILE:-}\" ] && [ -f \"${SECURITY_PROFILE_TLS_CERT_FILE}\" ]; then",
+		"    curl --cacert \"${SECURITY_PROFILE_TLS_CERT_FILE}\" \"$@\"",
+		"    return",
+		"  fi",
+		"  if [ \"${FUSEKI_WRITE_URL#https://}\" != \"${FUSEKI_WRITE_URL}\" ]; then",
+		"    curl -k \"$@\"",
+		"    return",
+		"  fi",
+		"  curl \"$@\"",
+		"}",
 		"echo \"Bootstrapping dataset ${DATASET_NAME} via ${FUSEKI_WRITE_URL}\"",
 		"cat /dataset-config/dataset.properties",
 		"if [ -f /dataset-config/spatial.properties ]; then cat /dataset-config/spatial.properties; fi",
 		"for attempt in $(seq 1 60); do",
-		"  if curl --silent --fail \"${FUSEKI_WRITE_URL}/$/ping\" >/dev/null 2>&1; then",
+		"  if curl_fuseki --silent --fail \"${FUSEKI_WRITE_URL}/$/ping\" >/dev/null 2>&1; then",
 		"    break",
 		"  fi",
 		"  if [ \"${attempt}\" -eq 60 ]; then",
@@ -203,7 +226,7 @@ func datasetBootstrapContainer(dataset *fusekiv1alpha1.Dataset, target datasetBo
 		"  sleep 2",
 		"done",
 		"if [ -n \"${FUSEKI_ADMIN_USER:-}\" ] && [ -n \"${FUSEKI_ADMIN_PASSWORD:-}\" ]; then",
-		"  status=$(curl --silent --output /tmp/fuseki-create.out --write-out '%{http_code}' -u \"${FUSEKI_ADMIN_USER}:${FUSEKI_ADMIN_PASSWORD}\" -H 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8' --data \"dbName=${DATASET_NAME}&dbType=${DATASET_DB_TYPE}\" \"${FUSEKI_WRITE_URL}/$/datasets\")",
+		"  status=$(curl_fuseki --silent --output /tmp/fuseki-create.out --write-out '%{http_code}' -u \"${FUSEKI_ADMIN_USER}:${FUSEKI_ADMIN_PASSWORD}\" -H 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8' --data \"dbName=${DATASET_NAME}&dbType=${DATASET_DB_TYPE}\" \"${FUSEKI_WRITE_URL}/$/datasets\")",
 		"  if [ \"${status}\" != \"200\" ] && [ \"${status}\" != \"201\" ] && [ \"${status}\" != \"409\" ]; then cat /tmp/fuseki-create.out; exit 1; fi",
 		"else",
 		"  echo \"Admin credentials are not configured; skipping authenticated dataset creation.\"",
@@ -212,7 +235,7 @@ func datasetBootstrapContainer(dataset *fusekiv1alpha1.Dataset, target datasetBo
 		"  while IFS='|' read -r uri format; do",
 		"    [ -z \"${uri}\" ] && continue",
 		"    content_type=${format:-text/turtle}",
-		"    curl --silent --show-error --fail -L \"${uri}\" | curl --silent --show-error --fail -u \"${FUSEKI_ADMIN_USER}:${FUSEKI_ADMIN_PASSWORD}\" -X POST -H \"Content-Type: ${content_type}\" --data-binary @- \"${FUSEKI_WRITE_URL}/${DATASET_NAME}/data\"",
+		"    curl --silent --show-error --fail -L \"${uri}\" | curl_fuseki --silent --show-error --fail -u \"${FUSEKI_ADMIN_USER}:${FUSEKI_ADMIN_PASSWORD}\" -X POST -H \"Content-Type: ${content_type}\" --data-binary @- \"${FUSEKI_WRITE_URL}/${DATASET_NAME}/data\"",
 		"  done < /dataset-config/preload.txt",
 		"elif [ -s /dataset-config/preload.txt ]; then",
 		"  echo \"Preload sources configured but admin credentials are absent; skipping data load.\"",
@@ -224,9 +247,7 @@ func datasetBootstrapContainer(dataset *fusekiv1alpha1.Dataset, target datasetBo
 		{Name: "DATASET_DB_TYPE", Value: strings.ToLower(string(dataset.DesiredType()))},
 		{Name: "FUSEKI_WRITE_URL", Value: target.WriteURL},
 	}
-	if securityProfile != nil && securityProfile.Spec.OIDCIssuerURL != "" {
-		env = append(env, corev1.EnvVar{Name: "SECURITY_PROFILE_OIDC_ISSUER", Value: securityProfile.Spec.OIDCIssuerURL})
-	}
+	env = append(env, fusekiSecurityEnvVars(securityProfile)...)
 	if adminSecretRef != nil {
 		env = append(env,
 			corev1.EnvVar{Name: "FUSEKI_ADMIN_USER", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: *adminSecretRef, Key: "username", Optional: ptrTo(true)}}},
@@ -240,12 +261,23 @@ func datasetBootstrapContainer(dataset *fusekiv1alpha1.Dataset, target datasetBo
 		ImagePullPolicy: target.ImagePullPolicy,
 		Command:         []string{"/bin/sh", "-ceu", script},
 		Env:             env,
-		VolumeMounts: []corev1.VolumeMount{{
-			Name:      datasetConfigVolumeName,
-			MountPath: "/dataset-config",
-			ReadOnly:  true,
-		}},
+		VolumeMounts:    datasetBootstrapVolumeMounts(securityProfile),
 	}
+}
+
+func datasetBootstrapVolumeMounts(securityProfile *fusekiv1alpha1.SecurityProfile) []corev1.VolumeMount {
+	mounts := []corev1.VolumeMount{{
+		Name:      datasetConfigVolumeName,
+		MountPath: "/dataset-config",
+		ReadOnly:  true,
+	}}
+	if securityMount := fusekiSecurityConfigVolumeMount(securityProfile); securityMount != nil {
+		mounts = append(mounts, *securityMount)
+	}
+	if tlsMount := fusekiSecurityTLSVolumeMount(securityProfile); tlsMount != nil {
+		mounts = append(mounts, *tlsMount)
+	}
+	return mounts
 }
 
 func resolveDatasetSecurity(ctx context.Context, c client.Client, namespace string, securityProfileRef *corev1.LocalObjectReference) (*fusekiv1alpha1.SecurityProfile, *corev1.LocalObjectReference, error) {

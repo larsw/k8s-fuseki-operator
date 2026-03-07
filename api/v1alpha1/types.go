@@ -336,6 +336,7 @@ type SecurityProfileSpec struct {
 type SecurityProfileStatus struct {
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 	Phase              string             `json:"phase,omitempty"`
+	ConfigMapName      string             `json:"configMapName,omitempty"`
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }
 
@@ -806,4 +807,8 @@ func (in *FusekiServer) DeploymentName() string {
 
 func (in *FusekiServer) PersistentVolumeClaimName() string {
 	return in.Name + "-data"
+}
+
+func (in *SecurityProfile) ConfigMapName() string {
+	return in.Name + "-security"
 }

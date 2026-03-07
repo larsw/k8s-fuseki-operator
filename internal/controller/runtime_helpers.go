@@ -6,8 +6,18 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	fusekiv1alpha1 "fuseki-operator/api/v1alpha1"
+)
+
+const (
+	securityConfigVolumeName = "security-config"
+	securityTLSVolumeName    = "security-tls"
+	securityTLSMountPath     = "/fuseki-extra/security/tls"
+	securityTLSCertFile      = securityTLSMountPath + "/tls.crt"
+	securityTLSKeyFile       = securityTLSMountPath + "/tls.key"
+	securityTLSCAFile        = securityTLSMountPath + "/ca.crt"
 )
 
 type datasetBootstrapTarget struct {
@@ -17,6 +27,80 @@ type datasetBootstrapTarget struct {
 	ImagePullPolicy    corev1.PullPolicy
 	WriteURL           string
 	SecurityProfileRef *corev1.LocalObjectReference
+}
+
+func securityProfileTLSEnabled(profile *fusekiv1alpha1.SecurityProfile) bool {
+	return profile != nil && profile.Spec.TLSSecretRef != nil && profile.Spec.TLSSecretRef.Name != ""
+}
+
+func fusekiListenerScheme(profile *fusekiv1alpha1.SecurityProfile) string {
+	if securityProfileTLSEnabled(profile) {
+		return "https"
+	}
+	return "http"
+}
+
+func fusekiProbeScheme(profile *fusekiv1alpha1.SecurityProfile) corev1.URIScheme {
+	if securityProfileTLSEnabled(profile) {
+		return corev1.URISchemeHTTPS
+	}
+	return corev1.URISchemeHTTP
+}
+
+func fusekiProbeHandler(profile *fusekiv1alpha1.SecurityProfile, port int32) corev1.ProbeHandler {
+	if securityProfileTLSEnabled(profile) {
+		return corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{
+			"/bin/sh",
+			"-ec",
+			fmt.Sprintf("curl --silent --show-error --fail --insecure https://127.0.0.1:%d/$/ping >/dev/null", port),
+		}}}
+	}
+
+	return corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+		Scheme: fusekiProbeScheme(profile),
+		Path:   "/$/ping",
+		Port:   intstr.FromInt32(port),
+	}}
+}
+
+func fusekiStartupProbe(profile *fusekiv1alpha1.SecurityProfile, port int32) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler:        fusekiProbeHandler(profile, port),
+		FailureThreshold:    30,
+		PeriodSeconds:       5,
+		InitialDelaySeconds: 5,
+	}
+}
+
+func fusekiReadinessProbe(profile *fusekiv1alpha1.SecurityProfile, port int32) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler:        fusekiProbeHandler(profile, port),
+		PeriodSeconds:       5,
+		InitialDelaySeconds: 10,
+	}
+}
+
+func fusekiLivenessProbe(profile *fusekiv1alpha1.SecurityProfile, port int32) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler:        fusekiProbeHandler(profile, port),
+		PeriodSeconds:       10,
+		InitialDelaySeconds: 15,
+	}
+}
+
+func fusekiServicePortName(profile *fusekiv1alpha1.SecurityProfile) string {
+	if securityProfileTLSEnabled(profile) {
+		return "https"
+	}
+	return "http"
+}
+
+func secureServiceURL(rawURL string, profile *fusekiv1alpha1.SecurityProfile) string {
+	if !securityProfileTLSEnabled(profile) {
+		return rawURL
+	}
+
+	return strings.Replace(rawURL, "http://", "https://", 1)
 }
 
 func renderFusekiConfigData(resourceName string, datasetRefs []corev1.LocalObjectReference, httpPort int32, writeServiceName string) map[string]string {
@@ -38,6 +122,29 @@ func renderFusekiConfigData(resourceName string, datasetRefs []corev1.LocalObjec
 
 	runScript := strings.Join([]string{
 		"set -eu",
+		"if [ -n \"${SECURITY_PROFILE_TLS_CERT_FILE:-}\" ] || [ -n \"${SECURITY_PROFILE_TLS_KEY_FILE:-}\" ]; then",
+		"  if [ ! -f \"${SECURITY_PROFILE_TLS_CERT_FILE:-}\" ] || [ ! -f \"${SECURITY_PROFILE_TLS_KEY_FILE:-}\" ]; then",
+		"    echo \"TLS configuration requested but certificate files are missing\" >&2",
+		"    exit 1",
+		"  fi",
+		"  https_dir=\"${FUSEKI_BASE}/https\"",
+		"  mkdir -p \"${https_dir}\"",
+		"  chmod 700 \"${https_dir}\"",
+		"  https_password_file=\"${https_dir}/https.passwd\"",
+		"  if [ ! -f \"${https_password_file}\" ]; then",
+		"    openssl rand -hex 18 > \"${https_password_file}\"",
+		"    chmod 600 \"${https_password_file}\"",
+		"  fi",
+		"  https_password=$(cat \"${https_password_file}\")",
+		"  keystore_file=\"${https_dir}/keystore.p12\"",
+		"  https_config=\"${https_dir}/https.json\"",
+		"  rm -f \"${FUSEKI_BASE}/shiro.ini\"",
+		"  openssl pkcs12 -export -name jetty -in \"${SECURITY_PROFILE_TLS_CERT_FILE}\" -inkey \"${SECURITY_PROFILE_TLS_KEY_FILE}\" -out \"${keystore_file}\" -passout \"pass:${https_password}\" >/dev/null 2>&1",
+		"  chmod 600 \"${keystore_file}\"",
+		"  printf '{ \"keystore\": \"%s\", \"passwd\": \"%s\" }\n' \"${keystore_file}\" \"${https_password}\" > \"${https_config}\"",
+		"  PATH=/opt/fuseki:${PATH:-}",
+		"  exec \"${JAVA_HOME}/bin/java\" -cp /opt/fuseki/fuseki-server.jar:/opt/fuseki/fuseki-operator-launcher.jar FusekiHttpsLauncher --https=\"${https_config}\" --httpsPort ${FUSEKI_PORT:-" + fmt.Sprintf("%d", httpPort) + "}",
+		"fi",
 		"exec /opt/fuseki/fuseki-server --config=/fuseki-extra/operator-config/fuseki-server.ttl --port ${FUSEKI_PORT:-" + fmt.Sprintf("%d", httpPort) + "}",
 	}, "\n") + "\n"
 
@@ -116,4 +223,103 @@ func fusekiAdminEnvVars(adminSecretRef *corev1.LocalObjectReference) []corev1.En
 			Optional:             &optional,
 		}},
 	}}
+}
+
+func renderSecurityProfileConfigData(profile *fusekiv1alpha1.SecurityProfile) map[string]string {
+	if profile == nil {
+		return map[string]string{"security.properties": ""}
+	}
+
+	properties := make([]string, 0, 8)
+	if profile.Spec.AdminCredentialsSecretRef != nil && profile.Spec.AdminCredentialsSecretRef.Name != "" {
+		properties = append(properties, "admin.secretRef="+profile.Spec.AdminCredentialsSecretRef.Name)
+	}
+	if profile.Spec.TLSSecretRef != nil && profile.Spec.TLSSecretRef.Name != "" {
+		properties = append(properties,
+			"tls.secretRef="+profile.Spec.TLSSecretRef.Name,
+			"tls.mountPath="+securityTLSMountPath,
+			"tls.certFile="+securityTLSCertFile,
+			"tls.keyFile="+securityTLSKeyFile,
+			"tls.caFile="+securityTLSCAFile,
+		)
+	}
+	if profile.Spec.OIDCIssuerURL != "" {
+		properties = append(properties, "oidc.issuerURL="+profile.Spec.OIDCIssuerURL)
+	}
+	sort.Strings(properties)
+
+	return map[string]string{
+		"security.properties": strings.Join(properties, "\n") + "\n",
+	}
+}
+
+func fusekiSecurityEnvVars(profile *fusekiv1alpha1.SecurityProfile) []corev1.EnvVar {
+	if profile == nil {
+		return nil
+	}
+
+	env := []corev1.EnvVar{
+		{Name: "SECURITY_PROFILE_NAME", Value: profile.Name},
+		{Name: "SECURITY_PROFILE_CONFIG_DIR", Value: "/fuseki-extra/security"},
+		{Name: "SECURITY_PROFILE_CONFIG", Value: "/fuseki-extra/security/security.properties"},
+	}
+	if profile.Spec.OIDCIssuerURL != "" {
+		env = append(env, corev1.EnvVar{Name: "SECURITY_PROFILE_OIDC_ISSUER", Value: profile.Spec.OIDCIssuerURL})
+	}
+	if profile.Spec.TLSSecretRef != nil && profile.Spec.TLSSecretRef.Name != "" {
+		env = append(env,
+			corev1.EnvVar{Name: "FUSEKI_SERVER_SCHEME", Value: "https"},
+			corev1.EnvVar{Name: "SECURITY_PROFILE_TLS_SECRET", Value: profile.Spec.TLSSecretRef.Name},
+			corev1.EnvVar{Name: "SECURITY_PROFILE_TLS_DIR", Value: securityTLSMountPath},
+			corev1.EnvVar{Name: "SECURITY_PROFILE_TLS_CERT_FILE", Value: securityTLSCertFile},
+			corev1.EnvVar{Name: "SECURITY_PROFILE_TLS_KEY_FILE", Value: securityTLSKeyFile},
+			corev1.EnvVar{Name: "SECURITY_PROFILE_TLS_CA_FILE", Value: securityTLSCAFile},
+		)
+	}
+
+	return env
+}
+
+func fusekiSecurityConfigVolume(profile *fusekiv1alpha1.SecurityProfile) *corev1.Volume {
+	if profile == nil {
+		return nil
+	}
+
+	return &corev1.Volume{
+		Name: securityConfigVolumeName,
+		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: profile.ConfigMapName()},
+		}},
+	}
+}
+
+func fusekiSecurityConfigVolumeMount(profile *fusekiv1alpha1.SecurityProfile) *corev1.VolumeMount {
+	if profile == nil {
+		return nil
+	}
+
+	return &corev1.VolumeMount{Name: securityConfigVolumeName, MountPath: "/fuseki-extra/security", ReadOnly: true}
+}
+
+func fusekiSecurityTLSVolume(profile *fusekiv1alpha1.SecurityProfile) *corev1.Volume {
+	if profile == nil || profile.Spec.TLSSecretRef == nil || profile.Spec.TLSSecretRef.Name == "" {
+		return nil
+	}
+
+	optional := true
+	return &corev1.Volume{
+		Name: securityTLSVolumeName,
+		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: profile.Spec.TLSSecretRef.Name,
+			Optional:   &optional,
+		}},
+	}
+}
+
+func fusekiSecurityTLSVolumeMount(profile *fusekiv1alpha1.SecurityProfile) *corev1.VolumeMount {
+	if profile == nil || profile.Spec.TLSSecretRef == nil || profile.Spec.TLSSecretRef.Name == "" {
+		return nil
+	}
+
+	return &corev1.VolumeMount{Name: securityTLSVolumeName, MountPath: securityTLSMountPath, ReadOnly: true}
 }

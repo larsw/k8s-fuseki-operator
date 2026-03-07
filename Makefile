@@ -13,7 +13,7 @@ CONTROLLER_GEN = $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen
 SETUP_ENVTEST = $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 ENVTEST_K8S_VERSION ?= 1.35.x
 
-.PHONY: fmt vet test envtest e2e-k3d-m3 run generate manifests docker-build-fuseki docker-build-rdf-delta-mock docker-smoke-fuseki tidy
+.PHONY: fmt vet test envtest e2e-k3d-m3 e2e-k3d-m4-oidc e2e-k3d-m4-tls run generate manifests docker-build-fuseki docker-build-rdf-delta-mock docker-smoke-fuseki tidy
 
 fmt:
 	$(GO) fmt ./...
@@ -29,6 +29,12 @@ envtest:
 
 e2e-k3d-m3:
 	bash ./hack/e2e/k3d-m3.sh
+
+e2e-k3d-m4-oidc:
+	bash ./hack/e2e/k3d-m4-oidc.sh
+
+e2e-k3d-m4-tls:
+	bash ./hack/e2e/k3d-m4-tls.sh
 
 run:
 	$(GO) run ./cmd/manager

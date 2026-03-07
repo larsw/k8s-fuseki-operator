@@ -149,6 +149,33 @@ func envVarSecretRefName(env []corev1.EnvVar, name string) string {
 	return ""
 }
 
+func volumeMountPath(mounts []corev1.VolumeMount, name string) string {
+	for _, mount := range mounts {
+		if mount.Name == name {
+			return mount.MountPath
+		}
+	}
+	return ""
+}
+
+func configMapVolumeName(volumes []corev1.Volume, name string) string {
+	for _, volume := range volumes {
+		if volume.Name == name && volume.ConfigMap != nil {
+			return volume.ConfigMap.Name
+		}
+	}
+	return ""
+}
+
+func secretVolumeName(volumes []corev1.Volume, name string) string {
+	for _, volume := range volumes {
+		if volume.Name == name && volume.Secret != nil {
+			return volume.Secret.SecretName
+		}
+	}
+	return ""
+}
+
 func containsLine(content, needle string) bool {
 	for _, line := range strings.Split(content, "\n") {
 		if line == needle {

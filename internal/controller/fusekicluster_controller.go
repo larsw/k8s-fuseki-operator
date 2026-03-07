@@ -57,20 +57,20 @@ func (r *FusekiClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileHeadlessService(ctx, &cluster); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	if err := r.reconcileService(ctx, &cluster, cluster.ReadServiceName(), "read", cluster.Spec.Services.ReadAnnotations); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	if err := r.reconcileService(ctx, &cluster, cluster.WriteServiceName(), "write", cluster.Spec.Services.WriteAnnotations); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	securityStatus, err := resolveSecurityDependency(ctx, r.Client, cluster.Namespace, cluster.Spec.SecurityProfileRef)
 	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileHeadlessService(ctx, &cluster, securityStatus.Profile); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileService(ctx, &cluster, securityStatus.Profile, cluster.ReadServiceName(), "read", cluster.Spec.Services.ReadAnnotations); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileService(ctx, &cluster, securityStatus.Profile, cluster.WriteServiceName(), "write", cluster.Spec.Services.WriteAnnotations); err != nil {
 		return ctrl.Result{}, err
 	}
 	observabilityStatus, err := r.reconcileObservability(ctx, &cluster)
@@ -78,7 +78,7 @@ func (r *FusekiClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	statefulSet, err := r.reconcileStatefulSet(ctx, &cluster, securityStatus.AdminSecretRef)
+	statefulSet, err := r.reconcileStatefulSet(ctx, &cluster, securityStatus.Profile, securityStatus.AdminSecretRef)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -211,7 +211,7 @@ func (r *FusekiClusterReconciler) reconcileConfigMap(ctx context.Context, cluste
 	return err
 }
 
-func (r *FusekiClusterReconciler) reconcileHeadlessService(ctx context.Context, cluster *fusekiv1alpha1.FusekiCluster) error {
+func (r *FusekiClusterReconciler) reconcileHeadlessService(ctx context.Context, cluster *fusekiv1alpha1.FusekiCluster, securityProfile *fusekiv1alpha1.SecurityProfile) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.HeadlessServiceName(),
@@ -225,7 +225,7 @@ func (r *FusekiClusterReconciler) reconcileHeadlessService(ctx context.Context, 
 		svc.Spec.PublishNotReadyAddresses = true
 		svc.Spec.Selector = clusterSelectorLabels(cluster)
 		svc.Spec.Ports = []corev1.ServicePort{{
-			Name:       "http",
+			Name:       fusekiServicePortName(securityProfile),
 			Port:       cluster.DesiredHTTPPort(),
 			Protocol:   corev1.ProtocolTCP,
 			TargetPort: intstr.FromInt32(cluster.DesiredHTTPPort()),
@@ -237,7 +237,7 @@ func (r *FusekiClusterReconciler) reconcileHeadlessService(ctx context.Context, 
 	return err
 }
 
-func (r *FusekiClusterReconciler) reconcileService(ctx context.Context, cluster *fusekiv1alpha1.FusekiCluster, name, role string, annotations map[string]string) error {
+func (r *FusekiClusterReconciler) reconcileService(ctx context.Context, cluster *fusekiv1alpha1.FusekiCluster, securityProfile *fusekiv1alpha1.SecurityProfile, name, role string, annotations map[string]string) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -251,7 +251,7 @@ func (r *FusekiClusterReconciler) reconcileService(ctx context.Context, cluster 
 		svc.Spec.Type = cluster.DesiredServiceType()
 		svc.Spec.Selector = serviceSelectorLabels(cluster, role)
 		svc.Spec.Ports = []corev1.ServicePort{{
-			Name:       "http",
+			Name:       fusekiServicePortName(securityProfile),
 			Port:       cluster.DesiredHTTPPort(),
 			Protocol:   corev1.ProtocolTCP,
 			TargetPort: intstr.FromInt32(cluster.DesiredHTTPPort()),
@@ -263,7 +263,7 @@ func (r *FusekiClusterReconciler) reconcileService(ctx context.Context, cluster 
 	return err
 }
 
-func (r *FusekiClusterReconciler) reconcileStatefulSet(ctx context.Context, cluster *fusekiv1alpha1.FusekiCluster, adminSecretRef *corev1.LocalObjectReference) (*appsv1.StatefulSet, error) {
+func (r *FusekiClusterReconciler) reconcileStatefulSet(ctx context.Context, cluster *fusekiv1alpha1.FusekiCluster, securityProfile *fusekiv1alpha1.SecurityProfile, adminSecretRef *corev1.LocalObjectReference) (*appsv1.StatefulSet, error) {
 	statefulSet := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.StatefulSetName(),
@@ -286,14 +286,21 @@ func (r *FusekiClusterReconciler) reconcileStatefulSet(ctx context.Context, clus
 			statefulSet.Spec.Template.ObjectMeta.Annotations = mergeStringMaps(nil, cluster.Spec.Observability.Logging.PodAnnotations)
 		}
 		statefulSet.Spec.Template.Spec.TerminationGracePeriodSeconds = ptrTo(int64(30))
-		statefulSet.Spec.Template.Spec.Containers = []corev1.Container{fusekiContainer(cluster, adminSecretRef)}
-		statefulSet.Spec.Template.Spec.Volumes = []corev1.Volume{
+		statefulSet.Spec.Template.Spec.Containers = []corev1.Container{fusekiContainer(cluster, securityProfile, adminSecretRef)}
+		volumes := []corev1.Volume{
 			{
 				Name:         fusekiConfigVolumeName,
 				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: cluster.ConfigMapName()}}},
 			},
 			fusekiDatasetConfigVolumeForRefs(cluster.Spec.DatasetRefs),
 		}
+		if securityVolume := fusekiSecurityConfigVolume(securityProfile); securityVolume != nil {
+			volumes = append(volumes, *securityVolume)
+		}
+		if tlsVolume := fusekiSecurityTLSVolume(securityProfile); tlsVolume != nil {
+			volumes = append(volumes, *tlsVolume)
+		}
+		statefulSet.Spec.Template.Spec.Volumes = volumes
 		statefulSet.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{fusekiPersistentVolumeClaim(cluster)}
 
 		return controllerutil.SetControllerReference(cluster, statefulSet, r.Scheme)
@@ -452,7 +459,7 @@ func serviceSelectorLabels(cluster *fusekiv1alpha1.FusekiCluster, role string) m
 	return selector
 }
 
-func fusekiContainer(cluster *fusekiv1alpha1.FusekiCluster, adminSecretRef *corev1.LocalObjectReference) corev1.Container {
+func fusekiContainer(cluster *fusekiv1alpha1.FusekiCluster, securityProfile *fusekiv1alpha1.SecurityProfile, adminSecretRef *corev1.LocalObjectReference) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "FUSEKI_BASE", Value: fusekiv1alpha1.DefaultFusekiDataMountPath},
 		{Name: "FUSEKI_CLUSTER", Value: cluster.Name},
@@ -465,41 +472,36 @@ func fusekiContainer(cluster *fusekiv1alpha1.FusekiCluster, adminSecretRef *core
 		{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
 		{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
 	}
+	env = append(env, fusekiSecurityEnvVars(securityProfile)...)
 	env = append(env, fusekiAdminEnvVars(adminSecretRef)...)
+	volumeMounts := []corev1.VolumeMount{
+		{Name: fusekiDataVolumeName, MountPath: fusekiv1alpha1.DefaultFusekiDataMountPath},
+		{Name: fusekiConfigVolumeName, MountPath: "/fuseki-extra/operator-config", ReadOnly: true},
+		{Name: datasetConfigVolumeName, MountPath: "/fuseki-extra/dataset-config", ReadOnly: true},
+	}
+	if securityMount := fusekiSecurityConfigVolumeMount(securityProfile); securityMount != nil {
+		volumeMounts = append(volumeMounts, *securityMount)
+	}
+	if tlsMount := fusekiSecurityTLSVolumeMount(securityProfile); tlsMount != nil {
+		volumeMounts = append(volumeMounts, *tlsMount)
+	}
 
 	return corev1.Container{
 		Name:            "fuseki",
 		Image:           cluster.Spec.Image,
 		ImagePullPolicy: cluster.DesiredImagePullPolicy(),
 		Ports: []corev1.ContainerPort{{
-			Name:          "http",
+			Name:          fusekiServicePortName(securityProfile),
 			ContainerPort: cluster.DesiredHTTPPort(),
 			Protocol:      corev1.ProtocolTCP,
 		}},
-		Env:       env,
-		Resources: cluster.Spec.Resources,
-		Args:      []string{"/bin/sh", "/fuseki-extra/operator-config/run-fuseki.sh"},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: fusekiDataVolumeName, MountPath: fusekiv1alpha1.DefaultFusekiDataMountPath},
-			{Name: fusekiConfigVolumeName, MountPath: "/fuseki-extra/operator-config", ReadOnly: true},
-			{Name: datasetConfigVolumeName, MountPath: "/fuseki-extra/dataset-config", ReadOnly: true},
-		},
-		StartupProbe: &corev1.Probe{
-			ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/$/ping", Port: intstr.FromInt32(cluster.DesiredHTTPPort())}},
-			FailureThreshold:    30,
-			PeriodSeconds:       5,
-			InitialDelaySeconds: 5,
-		},
-		ReadinessProbe: &corev1.Probe{
-			ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/$/ping", Port: intstr.FromInt32(cluster.DesiredHTTPPort())}},
-			PeriodSeconds:       5,
-			InitialDelaySeconds: 10,
-		},
-		LivenessProbe: &corev1.Probe{
-			ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/$/ping", Port: intstr.FromInt32(cluster.DesiredHTTPPort())}},
-			PeriodSeconds:       10,
-			InitialDelaySeconds: 15,
-		},
+		Env:            env,
+		Resources:      cluster.Spec.Resources,
+		Args:           []string{"/bin/sh", "/fuseki-extra/operator-config/run-fuseki.sh"},
+		VolumeMounts:   volumeMounts,
+		StartupProbe:   fusekiStartupProbe(securityProfile, cluster.DesiredHTTPPort()),
+		ReadinessProbe: fusekiReadinessProbe(securityProfile, cluster.DesiredHTTPPort()),
+		LivenessProbe:  fusekiLivenessProbe(securityProfile, cluster.DesiredHTTPPort()),
 	}
 }
 
