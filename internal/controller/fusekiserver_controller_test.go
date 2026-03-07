@@ -7,6 +7,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -47,13 +48,20 @@ func TestFusekiServerReconcileCreatesBaseResources(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "admin-auth", Namespace: "default"},
 		Spec:       fusekiv1alpha1.SecurityProfileSpec{AdminCredentialsSecretRef: &corev1.LocalObjectReference{Name: "admin-secret"}},
 	}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "admin-secret", Namespace: "default"}}
 
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&fusekiv1alpha1.Dataset{}).
+		WithStatusSubresource(&fusekiv1alpha1.SecurityProfile{}).
 		WithStatusSubresource(&fusekiv1alpha1.FusekiServer{}).
-		WithObjects(server, dataset, profile).
+		WithObjects(server, dataset, profile, secret).
 		Build()
+
+	securityReconciler := &SecurityProfileReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := securityReconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(profile)}); err != nil {
+		t.Fatalf("reconcile security profile: %v", err)
+	}
 
 	datasetReconciler := &DatasetReconciler{Client: k8sClient, Scheme: scheme}
 	if _, err := datasetReconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dataset)}); err != nil {
@@ -117,5 +125,65 @@ func TestFusekiServerReconcileCreatesBaseResources(t *testing.T) {
 	}
 	if updated.Status.DeploymentName != "standalone" {
 		t.Fatalf("unexpected status deployment name: %q", updated.Status.DeploymentName)
+	}
+}
+
+func TestFusekiServerReconcileDefersBootstrapUntilSecurityReady(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add batch scheme: %v", err)
+	}
+
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "dataset-a", Namespace: "default"}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	server := &fusekiv1alpha1.FusekiServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "standalone", Namespace: "default"},
+		Spec: fusekiv1alpha1.FusekiServerSpec{
+			Image:              "ghcr.io/example/fuseki:6.0.0",
+			DatasetRefs:        []corev1.LocalObjectReference{{Name: "dataset-a"}},
+			SecurityProfileRef: &corev1.LocalObjectReference{Name: "missing-profile"},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.Dataset{}).
+		WithStatusSubresource(&fusekiv1alpha1.FusekiServer{}).
+		WithObjects(server, dataset).
+		Build()
+
+	datasetReconciler := &DatasetReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := datasetReconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dataset)}); err != nil {
+		t.Fatalf("reconcile dataset: %v", err)
+	}
+
+	reconciler := &FusekiServerReconciler{Client: k8sClient, Scheme: scheme}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(server)})
+	if err != nil {
+		t.Fatalf("reconcile server: %v", err)
+	}
+	if result.RequeueAfter != securityProfileRequeueInterval {
+		t.Fatalf("unexpected requeue interval: %s", result.RequeueAfter)
+	}
+
+	job := &batchv1.Job{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "server-standalone-dataset-a-bootstrap"}, job); err == nil {
+		t.Fatalf("expected bootstrap job to be deferred until security is ready")
+	}
+
+	updated := &fusekiv1alpha1.FusekiServer{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(server), updated); err != nil {
+		t.Fatalf("get updated server: %v", err)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, securityReadyConditionType)
+	if condition == nil || condition.Status != metav1.ConditionFalse {
+		t.Fatalf("expected security condition false, got %#v", condition)
 	}
 }

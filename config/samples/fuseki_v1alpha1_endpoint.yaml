@@ -1,0 +1,16 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: Endpoint
+metadata:
+  name: example-endpoint
+spec:
+  targetRef:
+    kind: FusekiCluster
+    name: example-fusekicluster
+  securityProfileRef:
+    name: example-securityprofile
+  read:
+    annotations:
+      prometheus.io/scrape: "true"
+  write:
+    annotations:
+      fuseki.apache.org/access: write

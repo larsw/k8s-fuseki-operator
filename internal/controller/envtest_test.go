@@ -68,6 +68,11 @@ func TestEnvtestFusekiServerDatasetBootstrap(t *testing.T) {
 		t.Fatalf("reconcile dataset: %v", err)
 	}
 
+	securityReconciler := &SecurityProfileReconciler{Client: client, Scheme: scheme}
+	if _, err := securityReconciler.Reconcile(ctx, reconcileRequest(profile)); err != nil {
+		t.Fatalf("reconcile security profile: %v", err)
+	}
+
 	serverReconciler := &FusekiServerReconciler{Client: client, Scheme: scheme}
 	if _, err := serverReconciler.Reconcile(ctx, reconcileRequest(server)); err != nil {
 		t.Fatalf("reconcile server: %v", err)
@@ -212,6 +217,54 @@ func TestEnvtestSecurityProfileStatusTransitions(t *testing.T) {
 	}
 	if updated.Status.Phase != "Ready" {
 		t.Fatalf("unexpected ready phase: %q", updated.Status.Phase)
+	}
+}
+
+func TestEnvtestEndpointExposeFusekiServer(t *testing.T) {
+	t.Helper()
+
+	ctx := context.Background()
+	_, client, scheme := startEnvtestClient(t)
+
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "envtest-endpoint"}}
+	if err := client.Create(ctx, namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	server := &fusekiv1alpha1.FusekiServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "standalone", Namespace: namespace.Name},
+		Spec:       fusekiv1alpha1.FusekiServerSpec{Image: "ghcr.io/example/fuseki:6.0.0"},
+	}
+	endpoint := &fusekiv1alpha1.Endpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: "public", Namespace: namespace.Name},
+		Spec: fusekiv1alpha1.EndpointSpec{
+			TargetRef: fusekiv1alpha1.EndpointTargetRef{Kind: fusekiv1alpha1.EndpointTargetKindFusekiServer, Name: server.Name},
+		},
+	}
+
+	if err := client.Create(ctx, server); err != nil {
+		t.Fatalf("create server: %v", err)
+	}
+	if err := client.Create(ctx, endpoint); err != nil {
+		t.Fatalf("create endpoint: %v", err)
+	}
+
+	serverReconciler := &FusekiServerReconciler{Client: client, Scheme: scheme}
+	if _, err := serverReconciler.Reconcile(ctx, reconcileRequest(server)); err != nil {
+		t.Fatalf("reconcile server: %v", err)
+	}
+
+	endpointReconciler := &EndpointReconciler{Client: client, Scheme: scheme}
+	if _, err := endpointReconciler.Reconcile(ctx, reconcileRequest(endpoint)); err != nil {
+		t.Fatalf("reconcile endpoint: %v", err)
+	}
+
+	readService := &corev1.Service{}
+	if err := client.Get(ctx, objectKey(namespace.Name, endpoint.ReadServiceName()), readService); err != nil {
+		t.Fatalf("get read service: %v", err)
+	}
+	if got := readService.Spec.Selector["fuseki.apache.org/server"]; got != server.Name {
+		t.Fatalf("unexpected endpoint selector: %q", got)
 	}
 }
 

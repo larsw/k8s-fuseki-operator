@@ -19,6 +19,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fusekiv1alpha1 "fuseki-operator/api/v1alpha1"
 )
@@ -66,7 +68,12 @@ func (r *FusekiClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	statefulSet, err := r.reconcileStatefulSet(ctx, &cluster)
+	securityStatus, err := resolveSecurityDependency(ctx, r.Client, cluster.Namespace, cluster.Spec.SecurityProfileRef)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	statefulSet, err := r.reconcileStatefulSet(ctx, &cluster, securityStatus.AdminSecretRef)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -79,8 +86,10 @@ func (r *FusekiClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.reconcilePodRouting(ctx, &cluster, writePodName); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.reconcileDatasetBootstrapJobs(ctx, &cluster); err != nil {
-		return ctrl.Result{}, err
+	if cluster.Spec.SecurityProfileRef == nil || securityStatus.Status == metav1.ConditionTrue {
+		if err := r.reconcileDatasetBootstrapJobs(ctx, &cluster); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	updated := cluster.DeepCopy()
@@ -108,6 +117,13 @@ func (r *FusekiClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		Message:            workloadConditionMessage("Fuseki", statefulSet.Status.ReadyReplicas, cluster.DesiredReplicas()),
 		ObservedGeneration: cluster.Generation,
 	})
+	apimeta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{
+		Type:               securityReadyConditionType,
+		Status:             securityStatus.Status,
+		Reason:             securityStatus.Reason,
+		Message:            securityStatus.Message,
+		ObservedGeneration: cluster.Generation,
+	})
 
 	if !reflect.DeepEqual(cluster.Status, updated.Status) {
 		cluster.Status = updated.Status
@@ -116,12 +132,17 @@ func (r *FusekiClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
+	if cluster.Spec.SecurityProfileRef != nil && securityStatus.Status != metav1.ConditionTrue {
+		return ctrl.Result{RequeueAfter: securityProfileRequeueInterval}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
 func (r *FusekiClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&fusekiv1alpha1.FusekiCluster{}).
+		Watches(&fusekiv1alpha1.SecurityProfile{}, handler.EnqueueRequestsFromMapFunc(r.requestsForSecurityProfile)).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Service{}).
 		Owns(&batchv1.Job{}).
@@ -226,19 +247,14 @@ func (r *FusekiClusterReconciler) reconcileService(ctx context.Context, cluster 
 	return err
 }
 
-func (r *FusekiClusterReconciler) reconcileStatefulSet(ctx context.Context, cluster *fusekiv1alpha1.FusekiCluster) (*appsv1.StatefulSet, error) {
+func (r *FusekiClusterReconciler) reconcileStatefulSet(ctx context.Context, cluster *fusekiv1alpha1.FusekiCluster, adminSecretRef *corev1.LocalObjectReference) (*appsv1.StatefulSet, error) {
 	statefulSet := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.StatefulSetName(),
 			Namespace: cluster.Namespace,
 		},
 	}
-	_, adminSecretRef, err := resolveDatasetSecurity(ctx, r.Client, cluster.Namespace, cluster.Spec.SecurityProfileRef)
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, statefulSet, func() error {
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, statefulSet, func() error {
 		statefulSet.Labels = mergeStringMaps(clusterLabels(cluster), map[string]string{"fuseki.apache.org/component": "server"})
 		statefulSet.Spec.ServiceName = cluster.HeadlessServiceName()
 		statefulSet.Spec.Replicas = ptrTo(cluster.DesiredReplicas())
@@ -264,6 +280,24 @@ func (r *FusekiClusterReconciler) reconcileStatefulSet(ctx context.Context, clus
 	})
 
 	return statefulSet, err
+}
+
+func (r *FusekiClusterReconciler) requestsForSecurityProfile(ctx context.Context, obj client.Object) []reconcile.Request {
+	var clusters fusekiv1alpha1.FusekiClusterList
+	if err := r.List(ctx, &clusters, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0)
+	for i := range clusters.Items {
+		cluster := &clusters.Items[i]
+		if cluster.Spec.SecurityProfileRef == nil || cluster.Spec.SecurityProfileRef.Name != obj.GetName() {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cluster)})
+	}
+
+	return requests
 }
 
 func (r *FusekiClusterReconciler) reconcileWriteLease(ctx context.Context, cluster *fusekiv1alpha1.FusekiCluster) (string, error) {

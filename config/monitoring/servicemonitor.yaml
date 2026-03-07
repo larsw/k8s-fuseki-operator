@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fuseki-operator-controller-manager
+  namespace: system
+  labels:
+    app.kubernetes.io/name: fuseki-operator
+spec:
+  namespaceSelector:
+    matchNames:
+      - system
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fuseki-operator
+      control-plane: controller-manager
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

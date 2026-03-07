@@ -230,10 +230,45 @@ type DatasetList struct {
 	Items           []Dataset `json:"items"`
 }
 
-type EndpointSpec struct{}
+// +kubebuilder:validation:Enum=FusekiCluster;FusekiServer
+type EndpointTargetKind string
+
+const (
+	EndpointTargetKindFusekiCluster EndpointTargetKind = "FusekiCluster"
+	EndpointTargetKindFusekiServer  EndpointTargetKind = "FusekiServer"
+)
+
+type EndpointTargetRef struct {
+	Kind EndpointTargetKind `json:"kind"`
+
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
+
+type EndpointServiceSpec struct {
+	// +kubebuilder:default=ClusterIP
+	Type corev1.ServiceType `json:"type,omitempty"`
+
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name,omitempty"`
+
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+type EndpointSpec struct {
+	TargetRef EndpointTargetRef `json:"targetRef"`
+
+	SecurityProfileRef *corev1.LocalObjectReference `json:"securityProfileRef,omitempty"`
+	Read               EndpointServiceSpec          `json:"read,omitempty"`
+	Write              EndpointServiceSpec          `json:"write,omitempty"`
+}
 
 type EndpointStatus struct {
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	Phase              string             `json:"phase,omitempty"`
+	ReadServiceName    string             `json:"readServiceName,omitempty"`
+	WriteServiceName   string             `json:"writeServiceName,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -550,6 +585,38 @@ func (in *Dataset) DesiredSpatialIndexPath() string {
 	}
 
 	return "spatial"
+}
+
+func (in *Endpoint) ReadServiceName() string {
+	if in.Spec.Read.Name != "" {
+		return in.Spec.Read.Name
+	}
+
+	return in.Name + "-read"
+}
+
+func (in *Endpoint) WriteServiceName() string {
+	if in.Spec.Write.Name != "" {
+		return in.Spec.Write.Name
+	}
+
+	return in.Name + "-write"
+}
+
+func (in *Endpoint) DesiredReadServiceType() corev1.ServiceType {
+	if in.Spec.Read.Type != "" {
+		return in.Spec.Read.Type
+	}
+
+	return corev1.ServiceTypeClusterIP
+}
+
+func (in *Endpoint) DesiredWriteServiceType() corev1.ServiceType {
+	if in.Spec.Write.Type != "" {
+		return in.Spec.Write.Type
+	}
+
+	return corev1.ServiceTypeClusterIP
 }
 
 func (in *FusekiServer) DesiredHTTPPort() int32 {

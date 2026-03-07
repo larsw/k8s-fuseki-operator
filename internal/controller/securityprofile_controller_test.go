@@ -111,7 +111,7 @@ func TestSecurityProfileReconcilePendingWhenSecretMissing(t *testing.T) {
 	if condition == nil || condition.Status != metav1.ConditionFalse {
 		t.Fatalf("expected configured condition false, got %#v", condition)
 	}
-	if condition == nil || condition.Reason != "ReferencesMissing" {
+	if condition.Reason != "ReferencesMissing" {
 		t.Fatalf("unexpected configured condition reason: %#v", condition)
 	}
 }

@@ -15,6 +15,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fusekiv1alpha1 "fuseki-operator/api/v1alpha1"
 )
@@ -46,12 +48,18 @@ func (r *FusekiServerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.reconcilePVC(ctx, &server); err != nil {
 		return ctrl.Result{}, err
 	}
-	deployment, err := r.reconcileDeployment(ctx, &server)
+	securityStatus, err := resolveSecurityDependency(ctx, r.Client, server.Namespace, server.Spec.SecurityProfileRef)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.reconcileDatasetBootstrapJobs(ctx, &server); err != nil {
+	deployment, err := r.reconcileDeployment(ctx, &server, securityStatus.AdminSecretRef)
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if server.Spec.SecurityProfileRef == nil || securityStatus.Status == metav1.ConditionTrue {
+		if err := r.reconcileDatasetBootstrapJobs(ctx, &server); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	updated := server.DeepCopy()
@@ -76,6 +84,13 @@ func (r *FusekiServerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Message:            workloadConditionMessage("FusekiServer", deployment.Status.ReadyReplicas, 1),
 		ObservedGeneration: server.Generation,
 	})
+	apimeta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{
+		Type:               securityReadyConditionType,
+		Status:             securityStatus.Status,
+		Reason:             securityStatus.Reason,
+		Message:            securityStatus.Message,
+		ObservedGeneration: server.Generation,
+	})
 
 	if !reflect.DeepEqual(server.Status, updated.Status) {
 		server.Status = updated.Status
@@ -84,12 +99,17 @@ func (r *FusekiServerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
+	if server.Spec.SecurityProfileRef != nil && securityStatus.Status != metav1.ConditionTrue {
+		return ctrl.Result{RequeueAfter: securityProfileRequeueInterval}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
 func (r *FusekiServerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&fusekiv1alpha1.FusekiServer{}).
+		Watches(&fusekiv1alpha1.SecurityProfile{}, handler.EnqueueRequestsFromMapFunc(r.requestsForSecurityProfile)).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
@@ -153,13 +173,9 @@ func (r *FusekiServerReconciler) reconcilePVC(ctx context.Context, server *fusek
 	return err
 }
 
-func (r *FusekiServerReconciler) reconcileDeployment(ctx context.Context, server *fusekiv1alpha1.FusekiServer) (*appsv1.Deployment, error) {
+func (r *FusekiServerReconciler) reconcileDeployment(ctx context.Context, server *fusekiv1alpha1.FusekiServer, adminSecretRef *corev1.LocalObjectReference) (*appsv1.Deployment, error) {
 	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: server.DeploymentName(), Namespace: server.Namespace}}
-	_, adminSecretRef, err := resolveDatasetSecurity(ctx, r.Client, server.Namespace, server.Spec.SecurityProfileRef)
-	if err != nil {
-		return nil, err
-	}
-	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
 		deployment.Labels = mergeStringMaps(fusekiServerLabels(server), map[string]string{"fuseki.apache.org/component": "server"})
 		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: fusekiServerSelectorLabels(server)}
 		deployment.Spec.Template.ObjectMeta.Labels = mergeStringMaps(fusekiServerSelectorLabels(server), map[string]string{"fuseki.apache.org/component": "server"})
@@ -179,6 +195,24 @@ func (r *FusekiServerReconciler) reconcileDeployment(ctx context.Context, server
 		return controllerutil.SetControllerReference(server, deployment, r.Scheme)
 	})
 	return deployment, err
+}
+
+func (r *FusekiServerReconciler) requestsForSecurityProfile(ctx context.Context, obj client.Object) []reconcile.Request {
+	var servers fusekiv1alpha1.FusekiServerList
+	if err := r.List(ctx, &servers, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0)
+	for i := range servers.Items {
+		server := &servers.Items[i]
+		if server.Spec.SecurityProfileRef == nil || server.Spec.SecurityProfileRef.Name != obj.GetName() {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(server)})
+	}
+
+	return requests
 }
 
 func fusekiServerLabels(server *fusekiv1alpha1.FusekiServer) map[string]string {

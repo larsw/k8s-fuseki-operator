@@ -104,6 +104,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&fusekicontroller.EndpointReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create controller", "controller", "Endpoint")
+		os.Exit(1)
+	}
+
 	ctrl.Log.WithName("setup").Info("starting manager", "version", version.String())
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		ctrl.Log.WithName("setup").Error(err, "manager exited")
