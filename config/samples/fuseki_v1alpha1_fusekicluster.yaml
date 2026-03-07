@@ -1,0 +1,16 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: FusekiCluster
+metadata:
+  name: example
+spec:
+  replicas: 3
+  image: ghcr.io/example/fuseki-operator/fuseki:6.0.0
+  httpPort: 3030
+  rdfDeltaServerRef:
+    name: example-delta
+  datasetRefs:
+    - name: example-dataset
+  storage:
+    accessMode: ReadWriteOnce
+    size: 20Gi
+

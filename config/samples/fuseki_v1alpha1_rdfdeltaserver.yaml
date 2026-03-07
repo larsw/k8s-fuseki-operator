@@ -1,0 +1,11 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: RDFDeltaServer
+metadata:
+  name: example-delta
+spec:
+  image: ghcr.io/example/rdf-delta:latest
+  replicas: 1
+  servicePort: 1066
+  storage:
+    accessMode: ReadWriteOnce
+    size: 20Gi

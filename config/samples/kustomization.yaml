@@ -1,0 +1,5 @@
+resources:
+  - fuseki_v1alpha1_fusekicluster.yaml
+  - fuseki_v1alpha1_fusekiserver.yaml
+  - fuseki_v1alpha1_rdfdeltaserver.yaml
+  - fuseki_v1alpha1_dataset.yaml

@@ -1,0 +1,8 @@
+.DS_Store
+bin/
+dist/
+coverage.out
+*.test
+*.out
+vendor/
+config/crd/bases/*.yaml

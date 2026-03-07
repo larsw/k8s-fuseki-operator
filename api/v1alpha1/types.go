@@ -1,0 +1,611 @@
+package v1alpha1
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	DefaultFusekiReplicas        int32 = 3
+	DefaultFusekiHTTPPort        int32 = 3030
+	DefaultRDFDeltaReplicas      int32 = 1
+	DefaultRDFDeltaServicePort   int32 = 1066
+	DefaultRDFDeltaRetentionDays int32 = 7
+	DefaultDatasetType                 = DatasetTypeTDB2
+	DefaultStorageSize                 = "20Gi"
+	DefaultFusekiDataMountPath         = "/fuseki"
+	DefaultRDFDeltaDataMountPath       = "/var/lib/rdf-delta"
+)
+
+// +kubebuilder:validation:Enum=TDB2
+type DatasetType string
+
+const (
+	DatasetTypeTDB2 DatasetType = "TDB2"
+)
+
+type FusekiClusterSpec struct {
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=3
+	Replicas int32 `json:"replicas,omitempty"`
+
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+
+	// +kubebuilder:default=IfNotPresent
+	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
+
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +kubebuilder:default=3030
+	HTTPPort int32 `json:"httpPort,omitempty"`
+
+	RDFDeltaServerRef corev1.LocalObjectReference   `json:"rdfDeltaServerRef"`
+	DatasetRefs       []corev1.LocalObjectReference `json:"datasetRefs,omitempty"`
+
+	SecurityProfileRef *corev1.LocalObjectReference `json:"securityProfileRef,omitempty"`
+	Resources          corev1.ResourceRequirements  `json:"resources,omitempty"`
+	Storage            FusekiClusterStorageSpec     `json:"storage,omitempty"`
+	LeaderElection     FusekiLeaderElectionSpec     `json:"leaderElection,omitempty"`
+	Services           FusekiClusterServiceSpec     `json:"services,omitempty"`
+}
+
+type FusekiClusterStorageSpec struct {
+	ClassName *string `json:"className,omitempty"`
+
+	// +kubebuilder:default=ReadWriteOnce
+	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode,omitempty"`
+
+	// +kubebuilder:default="20Gi"
+	Size resource.Quantity `json:"size,omitempty"`
+}
+
+type FusekiLeaderElectionSpec struct {
+	LeaseDuration metav1.Duration `json:"leaseDuration,omitempty"`
+	RenewDeadline metav1.Duration `json:"renewDeadline,omitempty"`
+	RetryPeriod   metav1.Duration `json:"retryPeriod,omitempty"`
+}
+
+type FusekiClusterServiceSpec struct {
+	// +kubebuilder:default=ClusterIP
+	Type corev1.ServiceType `json:"type,omitempty"`
+
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	ReadServiceName string `json:"readServiceName,omitempty"`
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	WriteServiceName string            `json:"writeServiceName,omitempty"`
+	ReadAnnotations  map[string]string `json:"readAnnotations,omitempty"`
+	WriteAnnotations map[string]string `json:"writeAnnotations,omitempty"`
+}
+
+type FusekiClusterStatus struct {
+	ObservedGeneration  int64              `json:"observedGeneration,omitempty"`
+	Phase               string             `json:"phase,omitempty"`
+	ConfigMapName       string             `json:"configMapName,omitempty"`
+	HeadlessServiceName string             `json:"headlessServiceName,omitempty"`
+	ReadServiceName     string             `json:"readServiceName,omitempty"`
+	WriteServiceName    string             `json:"writeServiceName,omitempty"`
+	WriteLeaseName      string             `json:"writeLeaseName,omitempty"`
+	ActiveWritePod      string             `json:"activeWritePod,omitempty"`
+	StatefulSetName     string             `json:"statefulSetName,omitempty"`
+	ReadyReplicas       int32              `json:"readyReplicas,omitempty"`
+	Conditions          []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+type FusekiCluster struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   FusekiClusterSpec   `json:"spec,omitempty"`
+	Status FusekiClusterStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type FusekiClusterList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []FusekiCluster `json:"items"`
+}
+
+type RDFDeltaServerSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+
+	// +kubebuilder:default=IfNotPresent
+	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
+
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1
+	Replicas int32 `json:"replicas,omitempty"`
+
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +kubebuilder:default=1066
+	ServicePort int32 `json:"servicePort,omitempty"`
+
+	Resources       corev1.ResourceRequirements  `json:"resources,omitempty"`
+	Storage         RDFDeltaStorageSpec          `json:"storage,omitempty"`
+	BackupPolicyRef *corev1.LocalObjectReference `json:"backupPolicyRef,omitempty"`
+	TLSSecretRef    *corev1.LocalObjectReference `json:"tlsSecretRef,omitempty"`
+
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=7
+	RetentionDays *int32 `json:"retentionDays,omitempty"`
+}
+
+type RDFDeltaStorageSpec struct {
+	ClassName *string `json:"className,omitempty"`
+
+	// +kubebuilder:default=ReadWriteOnce
+	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode,omitempty"`
+
+	// +kubebuilder:default="20Gi"
+	Size resource.Quantity `json:"size,omitempty"`
+}
+
+type RDFDeltaServerStatus struct {
+	ObservedGeneration  int64              `json:"observedGeneration,omitempty"`
+	Phase               string             `json:"phase,omitempty"`
+	ConfigMapName       string             `json:"configMapName,omitempty"`
+	ServiceName         string             `json:"serviceName,omitempty"`
+	HeadlessServiceName string             `json:"headlessServiceName,omitempty"`
+	StatefulSetName     string             `json:"statefulSetName,omitempty"`
+	ReadyReplicas       int32              `json:"readyReplicas,omitempty"`
+	Conditions          []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+type RDFDeltaServer struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   RDFDeltaServerSpec   `json:"spec,omitempty"`
+	Status RDFDeltaServerStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type RDFDeltaServerList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []RDFDeltaServer `json:"items"`
+}
+
+type DatasetSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// +kubebuilder:default=TDB2
+	Type DatasetType `json:"type,omitempty"`
+
+	DisplayName      string                        `json:"displayName,omitempty"`
+	Preload          []DatasetPreloadSource        `json:"preload,omitempty"`
+	Spatial          *JenaSpatialSpec              `json:"spatial,omitempty"`
+	BackupPolicyRef  *corev1.LocalObjectReference  `json:"backupPolicyRef,omitempty"`
+	SecurityPolicies []corev1.LocalObjectReference `json:"securityPolicies,omitempty"`
+}
+
+type DatasetPreloadSource struct {
+	// +kubebuilder:validation:Pattern=`^(https?|s3)://.+`
+	URI string `json:"uri"`
+
+	Format    string                       `json:"format,omitempty"`
+	SecretRef *corev1.LocalObjectReference `json:"secretRef,omitempty"`
+}
+
+type JenaSpatialSpec struct {
+	Enabled bool `json:"enabled,omitempty"`
+
+	Assembler string `json:"assembler,omitempty"`
+	// +kubebuilder:default=spatial
+	SpatialIndexPath  string `json:"spatialIndexPath,omitempty"`
+	AdditionalClasses string `json:"additionalClasses,omitempty"`
+}
+
+type DatasetStatus struct {
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	Phase              string             `json:"phase,omitempty"`
+	ConfigMapName      string             `json:"configMapName,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+type Dataset struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   DatasetSpec   `json:"spec,omitempty"`
+	Status DatasetStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type DatasetList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []Dataset `json:"items"`
+}
+
+type EndpointSpec struct{}
+
+type EndpointStatus struct {
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+type Endpoint struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   EndpointSpec   `json:"spec,omitempty"`
+	Status EndpointStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type EndpointList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []Endpoint `json:"items"`
+}
+
+type SecurityProfileSpec struct {
+	AdminCredentialsSecretRef *corev1.LocalObjectReference `json:"adminCredentialsSecretRef,omitempty"`
+	TLSSecretRef              *corev1.LocalObjectReference `json:"tlsSecretRef,omitempty"`
+	OIDCIssuerURL             string                       `json:"oidcIssuerURL,omitempty"`
+}
+
+type SecurityProfileStatus struct {
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+type SecurityProfile struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   SecurityProfileSpec   `json:"spec,omitempty"`
+	Status SecurityProfileStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type SecurityProfileList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []SecurityProfile `json:"items"`
+}
+
+type BackupPolicySpec struct{}
+
+type BackupPolicyStatus struct {
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+type BackupPolicy struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   BackupPolicySpec   `json:"spec,omitempty"`
+	Status BackupPolicyStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type BackupPolicyList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []BackupPolicy `json:"items"`
+}
+
+type FusekiServerSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+
+	// +kubebuilder:default=IfNotPresent
+	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
+
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +kubebuilder:default=3030
+	HTTPPort int32 `json:"httpPort,omitempty"`
+
+	DatasetRefs        []corev1.LocalObjectReference `json:"datasetRefs,omitempty"`
+	SecurityProfileRef *corev1.LocalObjectReference  `json:"securityProfileRef,omitempty"`
+	Resources          corev1.ResourceRequirements   `json:"resources,omitempty"`
+	Storage            FusekiClusterStorageSpec      `json:"storage,omitempty"`
+	Service            FusekiServerServiceSpec       `json:"service,omitempty"`
+}
+
+type FusekiServerServiceSpec struct {
+	// +kubebuilder:default=ClusterIP
+	Type corev1.ServiceType `json:"type,omitempty"`
+
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name        string            `json:"name,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+type FusekiServerStatus struct {
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	Phase              string             `json:"phase,omitempty"`
+	ConfigMapName      string             `json:"configMapName,omitempty"`
+	ServiceName        string             `json:"serviceName,omitempty"`
+	DeploymentName     string             `json:"deploymentName,omitempty"`
+	PVCName            string             `json:"pvcName,omitempty"`
+	ReadyReplicas      int32              `json:"readyReplicas,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+type FusekiServer struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   FusekiServerSpec   `json:"spec,omitempty"`
+	Status FusekiServerStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type FusekiServerList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []FusekiServer `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(
+		&FusekiCluster{},
+		&FusekiClusterList{},
+		&FusekiServer{},
+		&FusekiServerList{},
+		&RDFDeltaServer{},
+		&RDFDeltaServerList{},
+		&Dataset{},
+		&DatasetList{},
+		&Endpoint{},
+		&EndpointList{},
+		&SecurityProfile{},
+		&SecurityProfileList{},
+		&BackupPolicy{},
+		&BackupPolicyList{},
+	)
+}
+
+func (in *FusekiCluster) DesiredReplicas() int32 {
+	if in.Spec.Replicas > 0 {
+		return in.Spec.Replicas
+	}
+
+	return DefaultFusekiReplicas
+}
+
+func (in *FusekiCluster) DesiredHTTPPort() int32 {
+	if in.Spec.HTTPPort > 0 {
+		return in.Spec.HTTPPort
+	}
+
+	return DefaultFusekiHTTPPort
+}
+
+func (in *FusekiCluster) DesiredImagePullPolicy() corev1.PullPolicy {
+	if in.Spec.ImagePullPolicy != "" {
+		return in.Spec.ImagePullPolicy
+	}
+
+	return corev1.PullIfNotPresent
+}
+
+func (in *FusekiCluster) DesiredServiceType() corev1.ServiceType {
+	if in.Spec.Services.Type != "" {
+		return in.Spec.Services.Type
+	}
+
+	return corev1.ServiceTypeClusterIP
+}
+
+func (in *FusekiCluster) DesiredStorageAccessMode() corev1.PersistentVolumeAccessMode {
+	if in.Spec.Storage.AccessMode != "" {
+		return in.Spec.Storage.AccessMode
+	}
+
+	return corev1.ReadWriteOnce
+}
+
+func (in *FusekiCluster) DesiredStorageSize() resource.Quantity {
+	if !in.Spec.Storage.Size.IsZero() {
+		return in.Spec.Storage.Size.DeepCopy()
+	}
+
+	return resource.MustParse(DefaultStorageSize)
+}
+
+func (in *FusekiCluster) ReadServiceName() string {
+	if in.Spec.Services.ReadServiceName != "" {
+		return in.Spec.Services.ReadServiceName
+	}
+
+	return in.Name + "-read"
+}
+
+func (in *FusekiCluster) WriteServiceName() string {
+	if in.Spec.Services.WriteServiceName != "" {
+		return in.Spec.Services.WriteServiceName
+	}
+
+	return in.Name + "-write"
+}
+
+func (in *FusekiCluster) ConfigMapName() string {
+	return in.Name + "-config"
+}
+
+func (in *FusekiCluster) HeadlessServiceName() string {
+	return in.Name + "-headless"
+}
+
+func (in *FusekiCluster) StatefulSetName() string {
+	return in.Name
+}
+
+func (in *FusekiCluster) WriteLeaseName() string {
+	return in.Name + "-write"
+}
+
+func (in *FusekiCluster) DesiredLeaseDurationSeconds() int32 {
+	if in.Spec.LeaderElection.LeaseDuration.Duration > 0 {
+		return int32(in.Spec.LeaderElection.LeaseDuration.Duration.Seconds())
+	}
+
+	return 15
+}
+
+func (in *RDFDeltaServer) DesiredReplicas() int32 {
+	if in.Spec.Replicas > 0 {
+		return in.Spec.Replicas
+	}
+
+	return DefaultRDFDeltaReplicas
+}
+
+func (in *RDFDeltaServer) DesiredServicePort() int32 {
+	if in.Spec.ServicePort > 0 {
+		return in.Spec.ServicePort
+	}
+
+	return DefaultRDFDeltaServicePort
+}
+
+func (in *RDFDeltaServer) DesiredImagePullPolicy() corev1.PullPolicy {
+	if in.Spec.ImagePullPolicy != "" {
+		return in.Spec.ImagePullPolicy
+	}
+
+	return corev1.PullIfNotPresent
+}
+
+func (in *RDFDeltaServer) DesiredStorageAccessMode() corev1.PersistentVolumeAccessMode {
+	if in.Spec.Storage.AccessMode != "" {
+		return in.Spec.Storage.AccessMode
+	}
+
+	return corev1.ReadWriteOnce
+}
+
+func (in *RDFDeltaServer) DesiredStorageSize() resource.Quantity {
+	if !in.Spec.Storage.Size.IsZero() {
+		return in.Spec.Storage.Size.DeepCopy()
+	}
+
+	return resource.MustParse(DefaultStorageSize)
+}
+
+func (in *RDFDeltaServer) DesiredRetentionDays() int32 {
+	if in.Spec.RetentionDays != nil && *in.Spec.RetentionDays > 0 {
+		return *in.Spec.RetentionDays
+	}
+
+	return DefaultRDFDeltaRetentionDays
+}
+
+func (in *RDFDeltaServer) ServiceName() string {
+	return in.Name
+}
+
+func (in *RDFDeltaServer) ConfigMapName() string {
+	return in.Name + "-config"
+}
+
+func (in *RDFDeltaServer) HeadlessServiceName() string {
+	return in.Name + "-headless"
+}
+
+func (in *RDFDeltaServer) StatefulSetName() string {
+	return in.Name
+}
+
+func (in *Dataset) ConfigMapName() string {
+	return in.Name + "-dataset-config"
+}
+
+func (in *Dataset) DesiredType() DatasetType {
+	if in.Spec.Type != "" {
+		return in.Spec.Type
+	}
+
+	return DefaultDatasetType
+}
+
+func (in *Dataset) DesiredSpatialIndexPath() string {
+	if in.Spec.Spatial != nil && in.Spec.Spatial.SpatialIndexPath != "" {
+		return in.Spec.Spatial.SpatialIndexPath
+	}
+
+	return "spatial"
+}
+
+func (in *FusekiServer) DesiredHTTPPort() int32 {
+	if in.Spec.HTTPPort > 0 {
+		return in.Spec.HTTPPort
+	}
+
+	return DefaultFusekiHTTPPort
+}
+
+func (in *FusekiServer) DesiredImagePullPolicy() corev1.PullPolicy {
+	if in.Spec.ImagePullPolicy != "" {
+		return in.Spec.ImagePullPolicy
+	}
+
+	return corev1.PullIfNotPresent
+}
+
+func (in *FusekiServer) DesiredServiceType() corev1.ServiceType {
+	if in.Spec.Service.Type != "" {
+		return in.Spec.Service.Type
+	}
+
+	return corev1.ServiceTypeClusterIP
+}
+
+func (in *FusekiServer) DesiredStorageAccessMode() corev1.PersistentVolumeAccessMode {
+	if in.Spec.Storage.AccessMode != "" {
+		return in.Spec.Storage.AccessMode
+	}
+
+	return corev1.ReadWriteOnce
+}
+
+func (in *FusekiServer) DesiredStorageSize() resource.Quantity {
+	if !in.Spec.Storage.Size.IsZero() {
+		return in.Spec.Storage.Size.DeepCopy()
+	}
+
+	return resource.MustParse(DefaultStorageSize)
+}
+
+func (in *FusekiServer) ConfigMapName() string {
+	return in.Name + "-config"
+}
+
+func (in *FusekiServer) ServiceName() string {
+	if in.Spec.Service.Name != "" {
+		return in.Spec.Service.Name
+	}
+
+	return in.Name
+}
+
+func (in *FusekiServer) DeploymentName() string {
+	return in.Name
+}
+
+func (in *FusekiServer) PersistentVolumeClaimName() string {
+	return in.Name + "-data"
+}

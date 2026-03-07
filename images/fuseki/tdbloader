@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# shellcheck disable=SC2086
+exec java ${JVM_ARGS:--Xmx1200M} -cp "${FUSEKI_HOME}/fuseki-server.jar" tdb.tdbloader "$@"

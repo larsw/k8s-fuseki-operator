@@ -1,0 +1,11 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: Dataset
+metadata:
+  name: example-dataset
+spec:
+  name: primary
+  type: TDB2
+  spatial:
+    enabled: true
+    assembler: spatial:EntityMap
+    spatialIndexPath: spatial
