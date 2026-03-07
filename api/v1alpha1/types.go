@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"time"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +18,8 @@ const (
 	DefaultStorageSize                 = "20Gi"
 	DefaultFusekiDataMountPath         = "/fuseki"
 	DefaultRDFDeltaDataMountPath       = "/var/lib/rdf-delta"
+	DefaultMetricsPath                 = "/$/metrics"
+	DefaultMetricsScrapeInterval       = 30 * time.Second
 )
 
 // +kubebuilder:validation:Enum=TDB2
@@ -49,6 +53,7 @@ type FusekiClusterSpec struct {
 	Storage            FusekiClusterStorageSpec     `json:"storage,omitempty"`
 	LeaderElection     FusekiLeaderElectionSpec     `json:"leaderElection,omitempty"`
 	Services           FusekiClusterServiceSpec     `json:"services,omitempty"`
+	Observability      WorkloadObservabilitySpec    `json:"observability,omitempty"`
 }
 
 type FusekiClusterStorageSpec struct {
@@ -79,6 +84,39 @@ type FusekiClusterServiceSpec struct {
 	WriteAnnotations map[string]string `json:"writeAnnotations,omitempty"`
 }
 
+type WorkloadObservabilitySpec struct {
+	Metrics *WorkloadMetricsSpec `json:"metrics,omitempty"`
+	Logging *WorkloadLoggingSpec `json:"logging,omitempty"`
+}
+
+type WorkloadMetricsSpec struct {
+	// +kubebuilder:default=true
+	Enabled *bool `json:"enabled,omitempty"`
+
+	Path           string                      `json:"path,omitempty"`
+	Service        WorkloadMetricsServiceSpec  `json:"service,omitempty"`
+	ServiceMonitor *WorkloadServiceMonitorSpec `json:"serviceMonitor,omitempty"`
+}
+
+type WorkloadMetricsServiceSpec struct {
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name,omitempty"`
+
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+type WorkloadServiceMonitorSpec struct {
+	// +kubebuilder:default=true
+	Enabled *bool `json:"enabled,omitempty"`
+
+	Interval metav1.Duration   `json:"interval,omitempty"`
+	Labels   map[string]string `json:"labels,omitempty"`
+}
+
+type WorkloadLoggingSpec struct {
+	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
+}
+
 type FusekiClusterStatus struct {
 	ObservedGeneration  int64              `json:"observedGeneration,omitempty"`
 	Phase               string             `json:"phase,omitempty"`
@@ -89,6 +127,7 @@ type FusekiClusterStatus struct {
 	WriteLeaseName      string             `json:"writeLeaseName,omitempty"`
 	ActiveWritePod      string             `json:"activeWritePod,omitempty"`
 	StatefulSetName     string             `json:"statefulSetName,omitempty"`
+	MetricsServiceName  string             `json:"metricsServiceName,omitempty"`
 	ReadyReplicas       int32              `json:"readyReplicas,omitempty"`
 	Conditions          []metav1.Condition `json:"conditions,omitempty"`
 }
@@ -357,6 +396,7 @@ type FusekiServerSpec struct {
 	Resources          corev1.ResourceRequirements   `json:"resources,omitempty"`
 	Storage            FusekiClusterStorageSpec      `json:"storage,omitempty"`
 	Service            FusekiServerServiceSpec       `json:"service,omitempty"`
+	Observability      WorkloadObservabilitySpec     `json:"observability,omitempty"`
 }
 
 type FusekiServerServiceSpec struct {
@@ -375,6 +415,7 @@ type FusekiServerStatus struct {
 	ServiceName        string             `json:"serviceName,omitempty"`
 	DeploymentName     string             `json:"deploymentName,omitempty"`
 	PVCName            string             `json:"pvcName,omitempty"`
+	MetricsServiceName string             `json:"metricsServiceName,omitempty"`
 	ReadyReplicas      int32              `json:"readyReplicas,omitempty"`
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }
@@ -481,6 +522,50 @@ func (in *FusekiCluster) WriteServiceName() string {
 
 func (in *FusekiCluster) ConfigMapName() string {
 	return in.Name + "-config"
+}
+
+func (in *FusekiCluster) ObservabilityMetricsEnabled() bool {
+	if in.Spec.Observability.Metrics == nil {
+		return false
+	}
+	if in.Spec.Observability.Metrics.Enabled == nil {
+		return true
+	}
+	return *in.Spec.Observability.Metrics.Enabled
+}
+
+func (in *FusekiCluster) DesiredMetricsPath() string {
+	if in.Spec.Observability.Metrics != nil && in.Spec.Observability.Metrics.Path != "" {
+		return in.Spec.Observability.Metrics.Path
+	}
+
+	return DefaultMetricsPath
+}
+
+func (in *FusekiCluster) MetricsServiceName() string {
+	if in.Spec.Observability.Metrics != nil && in.Spec.Observability.Metrics.Service.Name != "" {
+		return in.Spec.Observability.Metrics.Service.Name
+	}
+
+	return in.Name + "-metrics"
+}
+
+func (in *FusekiCluster) ObservabilityServiceMonitorEnabled() bool {
+	if !in.ObservabilityMetricsEnabled() || in.Spec.Observability.Metrics.ServiceMonitor == nil {
+		return false
+	}
+	if in.Spec.Observability.Metrics.ServiceMonitor.Enabled == nil {
+		return true
+	}
+	return *in.Spec.Observability.Metrics.ServiceMonitor.Enabled
+}
+
+func (in *FusekiCluster) DesiredMetricsInterval() time.Duration {
+	if in.Spec.Observability.Metrics != nil && in.Spec.Observability.Metrics.ServiceMonitor != nil && in.Spec.Observability.Metrics.ServiceMonitor.Interval.Duration > 0 {
+		return in.Spec.Observability.Metrics.ServiceMonitor.Interval.Duration
+	}
+
+	return DefaultMetricsScrapeInterval
 }
 
 func (in *FusekiCluster) HeadlessServiceName() string {
@@ -657,6 +742,50 @@ func (in *FusekiServer) DesiredStorageSize() resource.Quantity {
 	}
 
 	return resource.MustParse(DefaultStorageSize)
+}
+
+func (in *FusekiServer) ObservabilityMetricsEnabled() bool {
+	if in.Spec.Observability.Metrics == nil {
+		return false
+	}
+	if in.Spec.Observability.Metrics.Enabled == nil {
+		return true
+	}
+	return *in.Spec.Observability.Metrics.Enabled
+}
+
+func (in *FusekiServer) DesiredMetricsPath() string {
+	if in.Spec.Observability.Metrics != nil && in.Spec.Observability.Metrics.Path != "" {
+		return in.Spec.Observability.Metrics.Path
+	}
+
+	return DefaultMetricsPath
+}
+
+func (in *FusekiServer) MetricsServiceName() string {
+	if in.Spec.Observability.Metrics != nil && in.Spec.Observability.Metrics.Service.Name != "" {
+		return in.Spec.Observability.Metrics.Service.Name
+	}
+
+	return in.Name + "-metrics"
+}
+
+func (in *FusekiServer) ObservabilityServiceMonitorEnabled() bool {
+	if !in.ObservabilityMetricsEnabled() || in.Spec.Observability.Metrics.ServiceMonitor == nil {
+		return false
+	}
+	if in.Spec.Observability.Metrics.ServiceMonitor.Enabled == nil {
+		return true
+	}
+	return *in.Spec.Observability.Metrics.ServiceMonitor.Enabled
+}
+
+func (in *FusekiServer) DesiredMetricsInterval() time.Duration {
+	if in.Spec.Observability.Metrics != nil && in.Spec.Observability.Metrics.ServiceMonitor != nil && in.Spec.Observability.Metrics.ServiceMonitor.Interval.Duration > 0 {
+		return in.Spec.Observability.Metrics.ServiceMonitor.Interval.Duration
+	}
+
+	return DefaultMetricsScrapeInterval
 }
 
 func (in *FusekiServer) ConfigMapName() string {

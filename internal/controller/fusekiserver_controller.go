@@ -29,9 +29,10 @@ type FusekiServerReconciler struct {
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=fusekiservers,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=fusekiservers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=datasets;securityprofiles,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps;services;persistentvolumeclaims,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=configmaps;services;persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 
 func (r *FusekiServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var server fusekiv1alpha1.FusekiServer
@@ -52,6 +53,10 @@ func (r *FusekiServerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	observabilityStatus, err := r.reconcileObservability(ctx, &server)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	deployment, err := r.reconcileDeployment(ctx, &server, securityStatus.AdminSecretRef)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -69,6 +74,7 @@ func (r *FusekiServerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	updated.Status.ServiceName = server.ServiceName()
 	updated.Status.DeploymentName = server.DeploymentName()
 	updated.Status.PVCName = server.PersistentVolumeClaimName()
+	updated.Status.MetricsServiceName = observabilityStatus.MetricsServiceName
 	updated.Status.ReadyReplicas = deployment.Status.ReadyReplicas
 	apimeta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{
 		Type:               configuredConditionType,
@@ -91,6 +97,13 @@ func (r *FusekiServerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Message:            securityStatus.Message,
 		ObservedGeneration: server.Generation,
 	})
+	apimeta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{
+		Type:               monitoringReadyConditionType,
+		Status:             observabilityStatus.ConditionStatus,
+		Reason:             observabilityStatus.Reason,
+		Message:            observabilityStatus.Message,
+		ObservedGeneration: server.Generation,
+	})
 
 	if !reflect.DeepEqual(server.Status, updated.Status) {
 		server.Status = updated.Status
@@ -101,6 +114,9 @@ func (r *FusekiServerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	if server.Spec.SecurityProfileRef != nil && securityStatus.Status != metav1.ConditionTrue {
 		return ctrl.Result{RequeueAfter: securityProfileRequeueInterval}, nil
+	}
+	if observabilityStatus.ConditionStatus != metav1.ConditionTrue {
+		return ctrl.Result{RequeueAfter: observabilityRequeueInterval}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -179,6 +195,10 @@ func (r *FusekiServerReconciler) reconcileDeployment(ctx context.Context, server
 		deployment.Labels = mergeStringMaps(fusekiServerLabels(server), map[string]string{"fuseki.apache.org/component": "server"})
 		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: fusekiServerSelectorLabels(server)}
 		deployment.Spec.Template.ObjectMeta.Labels = mergeStringMaps(fusekiServerSelectorLabels(server), map[string]string{"fuseki.apache.org/component": "server"})
+		deployment.Spec.Template.ObjectMeta.Annotations = nil
+		if server.Spec.Observability.Logging != nil {
+			deployment.Spec.Template.ObjectMeta.Annotations = mergeStringMaps(nil, server.Spec.Observability.Logging.PodAnnotations)
+		}
 		deployment.Spec.Template.Spec.TerminationGracePeriodSeconds = ptrTo(int64(30))
 		deployment.Spec.Template.Spec.Containers = []corev1.Container{fusekiServerContainer(server, adminSecretRef)}
 		deployment.Spec.Template.Spec.Volumes = []corev1.Volume{
@@ -195,6 +215,32 @@ func (r *FusekiServerReconciler) reconcileDeployment(ctx context.Context, server
 		return controllerutil.SetControllerReference(server, deployment, r.Scheme)
 	})
 	return deployment, err
+}
+
+func (r *FusekiServerReconciler) reconcileObservability(ctx context.Context, server *fusekiv1alpha1.FusekiServer) (workloadObservabilityStatus, error) {
+	var metricsAnnotations map[string]string
+	var serviceMonitorLabels map[string]string
+	if server.Spec.Observability.Metrics != nil {
+		metricsAnnotations = server.Spec.Observability.Metrics.Service.Annotations
+		if server.Spec.Observability.Metrics.ServiceMonitor != nil {
+			serviceMonitorLabels = server.Spec.Observability.Metrics.ServiceMonitor.Labels
+		}
+	}
+
+	return reconcileWorkloadObservability(ctx, r.Client, workloadObservabilityConfig{
+		Owner:                     server,
+		Scheme:                    r.Scheme,
+		Labels:                    fusekiServerLabels(server),
+		Selector:                  fusekiServerSelectorLabels(server),
+		MetricsEnabled:            server.ObservabilityMetricsEnabled(),
+		MetricsServiceName:        server.MetricsServiceName(),
+		MetricsServicePort:        server.DesiredHTTPPort(),
+		MetricsServiceAnnotations: metricsAnnotations,
+		MetricsPath:               server.DesiredMetricsPath(),
+		ServiceMonitorEnabled:     server.ObservabilityServiceMonitorEnabled(),
+		ServiceMonitorInterval:    server.DesiredMetricsInterval(),
+		ServiceMonitorLabels:      serviceMonitorLabels,
+	})
 }
 
 func (r *FusekiServerReconciler) requestsForSecurityProfile(ctx context.Context, obj client.Object) []reconcile.Request {

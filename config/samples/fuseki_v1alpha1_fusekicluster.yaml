@@ -13,4 +13,15 @@ spec:
   storage:
     accessMode: ReadWriteOnce
     size: 20Gi
+  observability:
+    metrics:
+      service:
+        annotations:
+          prometheus.io/scrape: "true"
+      serviceMonitor:
+        labels:
+          release: prometheus
+    logging:
+      podAnnotations:
+        logs.example.com/enabled: "true"
 
