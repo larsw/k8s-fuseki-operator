@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fuseki-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "fuseki-operator.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "fuseki-operator.selectorLabels" . | indent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "fuseki-operator.selectorLabels" . | indent 8 }}
+{{- with .Values.podAnnotations }}
+      annotations:
+{{ toYaml . | indent 8 }}
+{{- end }}
+    spec:
+{{- if .Values.image.pullSecrets }}
+      imagePullSecrets:
+{{ toYaml .Values.image.pullSecrets | indent 8 }}
+{{- end }}
+{{- with .Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.affinity }}
+      affinity:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.tolerations }}
+      tolerations:
+{{ toYaml . | indent 8 }}
+{{- end }}
+      serviceAccountName: {{ include "fuseki-operator.serviceAccountName" . }}
+      containers:
+        - name: manager
+          image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /manager
+          args:
+{{- if .Values.leaderElection }}
+            - --leader-elect
+{{- end }}
+{{- range .Values.manager.extraArgs }}
+            - {{ . | quote }}
+{{- end }}
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+          ports:
+            - containerPort: 8080
+              name: metrics
+            - containerPort: 8081
+              name: probes

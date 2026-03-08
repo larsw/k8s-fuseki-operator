@@ -1,0 +1,21 @@
+{{- if .Values.metricsService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.metricsService.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "fuseki-operator.labels" . | indent 4 }}
+{{- if .Values.metricsService.annotations }}
+  annotations:
+{{ toYaml .Values.metricsService.annotations | indent 4 }}
+{{- end }}
+spec:
+  selector:
+{{ include "fuseki-operator.selectorLabels" . | indent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metricsService.port }}
+      protocol: TCP
+      targetPort: metrics
+{{- end }}

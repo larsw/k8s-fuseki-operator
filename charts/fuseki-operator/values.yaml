@@ -1,0 +1,44 @@
+fullnameOverride: fuseki-operator-controller-manager
+
+image:
+  repository: ghcr.io/example/fuseki-operator/controller
+  tag: dev
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+replicaCount: 1
+leaderElection: true
+
+manager:
+  extraArgs: []
+
+podAnnotations: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+serviceAccount:
+  create: true
+  name: fuseki-operator-controller-manager
+  annotations: {}
+
+rbac:
+  clusterRoleName: fuseki-operator-manager-role
+  clusterRoleBindingName: fuseki-operator-manager-rolebinding
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+metricsService:
+  enabled: true
+  name: fuseki-operator-controller-manager-metrics
+  port: 8080
+  annotations: {}

@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: fuseki-operator-controller-manager
-  namespace: system
+  namespace: fuseki-system
 spec:
   replicas: 1
   selector:
@@ -15,6 +15,7 @@ spec:
         app.kubernetes.io/name: fuseki-operator
         control-plane: controller-manager
     spec:
+      serviceAccountName: fuseki-operator-controller-manager
       containers:
         - name: manager
           image: ghcr.io/example/fuseki-operator/controller:dev

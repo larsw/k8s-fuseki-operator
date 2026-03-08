@@ -11,6 +11,7 @@ Optional local tools:
 - `controller-gen`
 - `kustomize`
 - `kubebuilder`
+- `helm`
 
 The scaffold does not require the binaries above to exist globally. The `Makefile` uses `go run` for controller generation so the tool can be fetched on demand.
 
@@ -29,6 +30,30 @@ make run
 
 The manager starts health and readiness probes and currently registers the first `FusekiCluster` reconciler.
 
+## Lint The Helm Chart
+
+The repository now includes an initial chart under `charts/fuseki-operator`.
+
+```sh
+make helm-lint
+make helm-test
+helm template fuseki-operator ./charts/fuseki-operator -n fuseki-system >/tmp/fuseki-operator-chart.yaml
+```
+
+The Helm test target renders the chart with both default values and override values so the checked-in chart surface stays covered as M6 packaging grows.
+
+The chart now exposes service account annotations plus the core scheduling controls (`nodeSelector`, `tolerations`, and `affinity`). Controller image tags remain overrideable through `image.tag`, which is the expected path for release installs.
+
+## Validate The OLM Bundle
+
+The repository now also includes an initial OLM bundle scaffold under `bundle/`.
+
+```sh
+make bundle-validate
+```
+
+The bundle validation script checks the checked-in CSV, metadata annotations, and owned CRD list. If `operator-sdk` is installed locally, it also runs `operator-sdk bundle validate ./bundle` as an upstream validation pass.
+
 ## Build The Custom Fuseki Image
 
 The repository now includes a checked-in [images/fuseki/versions.mk](../images/fuseki/versions.mk) with the current verified Apache Jena Fuseki release inputs. Build the image with:
@@ -42,7 +67,7 @@ To override the pinned release for testing, pass `JENA_VERSION` and `JENA_SHA512
 
 ## Run The First k3d M3 Scenario
 
-The repository now includes a first k3d-backed M3 scenario that runs the manager locally against a disposable k3d cluster, builds the local Fuseki image, builds a small mock RDF Delta image for the test harness, applies CRDs and example resources, and verifies:
+The repository now includes a first k3d-backed M3 scenario that runs the manager locally against a disposable k3d cluster, builds the local Fuseki image, builds the in-repo RDF Delta image for the test harness, applies CRDs and example resources, and verifies:
 
 - RDF Delta and Fuseki workloads become ready
 - the write lease selects a single pod
@@ -64,7 +89,6 @@ KEEP_CLUSTER=1 make e2e-k3d-m3
 
 ## Next Scaffold Steps
 
-1. Expand the remaining CRD types beyond the first `FusekiCluster`, `RDFDeltaServer`, and `Dataset` field sets.
-2. Add stateful workload reconciliation for Fuseki and RDF Delta.
-3. Add k3d automation and end-to-end coverage.
-4. Add backup and restore workflow implementation.
+1. Expand the Helm chart with upgrade guidance.
+2. Deepen the OLM metadata and automate CSV generation from release inputs.
+3. Add release docs, upgrade notes, and artifact publishing workflows.

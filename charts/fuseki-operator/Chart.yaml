@@ -1,0 +1,6 @@
+apiVersion: v2
+name: fuseki-operator
+description: Helm chart for installing the fuseki-operator controller and CRDs
+type: application
+version: 0.1.0
+appVersion: dev

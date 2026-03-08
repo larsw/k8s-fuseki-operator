@@ -1,0 +1,216 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  name: fuseki-operator.v0.1.0
+  annotations:
+    alm-examples: '[]'
+    capabilities: Basic Install
+    categories: Database
+    containerImage: ghcr.io/example/fuseki-operator/controller:dev
+    createdAt: "2026-03-08T00:00:00Z"
+    description: Operator for Apache Jena Fuseki clusters, RDF Delta replication, security, and backup or restore workflows.
+    operators.operatorframework.io/builder: manual
+    operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
+spec:
+  displayName: Fuseki Operator
+  description: |
+    Fuseki Operator manages Apache Jena Fuseki clusters on Kubernetes.
+
+    The operator reconciles Fuseki clusters, RDF Delta servers, datasets, security profiles,
+    ingress endpoints, UI resources, and backup or restore workflows.
+  version: 0.1.0
+  maturity: alpha
+  minKubeVersion: 1.33.0
+  provider:
+    name: fuseki-operator
+  keywords:
+    - fuseki
+    - rdf-delta
+    - sparql
+    - kubernetes
+  installModes:
+    - type: OwnNamespace
+      supported: false
+    - type: SingleNamespace
+      supported: false
+    - type: MultiNamespace
+      supported: false
+    - type: AllNamespaces
+      supported: true
+  customresourcedefinitions:
+    owned:
+      - name: backuppolicies.fuseki.apache.org
+        version: v1alpha1
+        kind: BackupPolicy
+        displayName: Backup Policy
+        description: Configures scheduled RDF Delta backups and target object storage settings.
+      - name: datasets.fuseki.apache.org
+        version: v1alpha1
+        kind: Dataset
+        displayName: Dataset
+        description: Describes dataset bootstrapping and storage settings for Fuseki workloads.
+      - name: endpoints.fuseki.apache.org
+        version: v1alpha1
+        kind: Endpoint
+        displayName: Endpoint
+        description: Publishes ingress or route-facing access to Fuseki services.
+      - name: fusekiclusters.fuseki.apache.org
+        version: v1alpha1
+        kind: FusekiCluster
+        displayName: Fuseki Cluster
+        description: Defines a managed Fuseki cluster paired with RDF Delta and attached datasets.
+      - name: fusekiservers.fuseki.apache.org
+        version: v1alpha1
+        kind: FusekiServer
+        displayName: Fuseki Server
+        description: Defines a standalone Fuseki server deployment.
+      - name: fusekiuis.fuseki.apache.org
+        version: v1alpha1
+        kind: FusekiUI
+        displayName: Fuseki UI
+        description: Deploys and exposes a Fuseki UI companion workload.
+      - name: rdfdeltaservers.fuseki.apache.org
+        version: v1alpha1
+        kind: RDFDeltaServer
+        displayName: RDF Delta Server
+        description: Manages the RDF Delta replication service used for write coordination and backups.
+      - name: restorerequests.fuseki.apache.org
+        version: v1alpha1
+        kind: RestoreRequest
+        displayName: Restore Request
+        description: Triggers and tracks restoration of RDF Delta state from a captured backup object.
+      - name: securityprofiles.fuseki.apache.org
+        version: v1alpha1
+        kind: SecurityProfile
+        displayName: Security Profile
+        description: Configures admin credentials, TLS, and identity-provider integration.
+  relatedImages:
+    - name: controller
+      image: ghcr.io/example/fuseki-operator/controller:dev
+    - name: fuseki
+      image: ghcr.io/example/fuseki-operator/fuseki:dev
+    - name: rdf-delta
+      image: ghcr.io/example/fuseki-operator/rdf-delta:dev
+  install:
+    strategy: deployment
+    spec:
+      clusterPermissions:
+        - serviceAccountName: fuseki-operator-controller-manager
+          rules:
+            - apiGroups:
+                - ""
+              resources:
+                - events
+                - pods
+                - services
+                - configmaps
+                - secrets
+                - persistentvolumeclaims
+              verbs:
+                - get
+                - list
+                - watch
+                - create
+                - update
+                - patch
+            - apiGroups:
+                - apps
+              resources:
+                - statefulsets
+                - deployments
+              verbs:
+                - get
+                - list
+                - watch
+                - create
+                - update
+                - patch
+            - apiGroups:
+                - networking.k8s.io
+              resources:
+                - ingresses
+              verbs:
+                - get
+                - list
+                - watch
+                - create
+                - update
+                - patch
+                - delete
+            - apiGroups:
+                - gateway.networking.k8s.io
+              resources:
+                - httproutes
+              verbs:
+                - get
+                - list
+                - watch
+                - create
+                - update
+                - patch
+                - delete
+            - apiGroups:
+                - batch
+              resources:
+                - cronjobs
+                - jobs
+              verbs:
+                - get
+                - list
+                - watch
+                - create
+                - update
+                - patch
+                - delete
+            - apiGroups:
+                - coordination.k8s.io
+              resources:
+                - leases
+              verbs:
+                - get
+                - list
+                - watch
+                - create
+                - update
+                - patch
+            - apiGroups:
+                - fuseki.apache.org
+              resources:
+                - '*'
+              verbs:
+                - '*'
+      deployments:
+        - name: fuseki-operator-controller-manager
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: fuseki-operator
+                control-plane: controller-manager
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: fuseki-operator
+                  control-plane: controller-manager
+              spec:
+                serviceAccountName: fuseki-operator-controller-manager
+                containers:
+                  - name: manager
+                    image: ghcr.io/example/fuseki-operator/controller:dev
+                    imagePullPolicy: IfNotPresent
+                    command:
+                      - /manager
+                    args:
+                      - --leader-elect
+                    ports:
+                      - containerPort: 8080
+                        name: metrics
+                      - containerPort: 8081
+                        name: probes
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 128Mi
+                      limits:
+                        cpu: 500m
+                        memory: 512Mi

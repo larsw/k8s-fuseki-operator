@@ -6,6 +6,7 @@ CONTAINER_TOOL ?= docker
 IMG ?= ghcr.io/example/fuseki-operator/controller:dev
 FUSEKI_IMAGE ?= ghcr.io/example/fuseki-operator/fuseki:dev
 RDF_DELTA_IMAGE ?= ghcr.io/example/fuseki-operator/rdf-delta:dev
+BUNDLE_IMAGE ?= ghcr.io/example/fuseki-operator/bundle:dev
 JENA_VERSION ?=
 JENA_SHA512 ?=
 JENA_COMMANDS_SHA512 ?=
@@ -14,7 +15,7 @@ CONTROLLER_GEN = $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen
 SETUP_ENVTEST = $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 ENVTEST_K8S_VERSION ?= 1.35.x
 
-.PHONY: fmt vet test envtest e2e-k3d-m3 e2e-k3d-m4-oidc e2e-k3d-m4-tls e2e-k3d-m5-backup-restore e2e-k3d-fusekiui-ingress run generate manifests docker-build-fuseki docker-build-rdf-delta docker-smoke-fuseki docker-smoke-rdf-delta tidy
+.PHONY: fmt vet test envtest e2e-k3d-m3 e2e-k3d-m4-oidc e2e-k3d-m4-tls e2e-k3d-m5-backup-restore e2e-k3d-fusekiui-ingress run build-fusekictl run-fusekictl helm-lint helm-test bundle-refresh-crds bundle-validate bundle-build generate manifests docker-build-fuseki docker-build-rdf-delta docker-smoke-fuseki docker-smoke-rdf-delta tidy
 
 fmt:
 	$(GO) fmt ./...
@@ -45,6 +46,29 @@ e2e-k3d-fusekiui-ingress:
 
 run:
 	$(GO) run ./cmd/manager
+
+build-fusekictl:
+	$(GO) build -o bin/fusekictl ./cmd/fusekictl
+
+run-fusekictl:
+	$(GO) run ./cmd/fusekictl $(ARGS)
+
+helm-lint:
+	helm lint ./charts/fuseki-operator
+
+helm-test:
+	bash ./hack/helm/test-chart.sh
+
+bundle-refresh-crds:
+	mkdir -p bundle/manifests
+	cp ./config/crd/bases/*.yaml ./bundle/manifests/
+	rm -f ./bundle/manifests/kustomization.yaml
+
+bundle-validate: bundle-refresh-crds
+	bash ./hack/olm/validate-bundle.sh
+
+bundle-build: bundle-refresh-crds
+	$(CONTAINER_TOOL) build -f bundle.Dockerfile -t $(BUNDLE_IMAGE) .
 
 tidy:
 	$(GO) mod tidy
