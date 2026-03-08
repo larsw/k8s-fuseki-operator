@@ -2,11 +2,12 @@ GO ?= go
 CONTAINER_TOOL ?= docker
 
 -include images/fuseki/versions.mk
+-include release/metadata.env
 
-IMG ?= ghcr.io/example/fuseki-operator/controller:dev
-FUSEKI_IMAGE ?= ghcr.io/example/fuseki-operator/fuseki:dev
-RDF_DELTA_IMAGE ?= ghcr.io/example/fuseki-operator/rdf-delta:dev
-BUNDLE_IMAGE ?= ghcr.io/example/fuseki-operator/bundle:dev
+IMG ?= ghcr.io/larsw/k8s-fuseki-operator/controller:dev
+FUSEKI_IMAGE ?= ghcr.io/larsw/k8s-fuseki-operator/fuseki:dev
+RDF_DELTA_IMAGE ?= ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:dev
+BUNDLE_IMAGE ?= ghcr.io/larsw/k8s-fuseki-operator/bundle:dev
 JENA_VERSION ?=
 JENA_SHA512 ?=
 JENA_COMMANDS_SHA512 ?=
@@ -15,7 +16,7 @@ CONTROLLER_GEN = $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen
 SETUP_ENVTEST = $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 ENVTEST_K8S_VERSION ?= 1.35.x
 
-.PHONY: fmt vet test envtest e2e-k3d-m3 e2e-k3d-m4-oidc e2e-k3d-m4-tls e2e-k3d-m5-backup-restore e2e-k3d-fusekiui-ingress run build-fusekictl run-fusekictl helm-lint helm-test bundle-refresh-crds bundle-validate bundle-build generate manifests docker-build-fuseki docker-build-rdf-delta docker-smoke-fuseki docker-smoke-rdf-delta tidy
+.PHONY: fmt vet test envtest e2e-k3d-m3 e2e-k3d-m4-oidc e2e-k3d-m4-tls e2e-k3d-m5-backup-restore e2e-k3d-fusekiui-ingress run build-fusekictl run-fusekictl release-sync release-verify release-artifacts helm-lint helm-test bundle-refresh-crds bundle-validate bundle-build generate manifests docker-build-fuseki docker-build-rdf-delta docker-smoke-fuseki docker-smoke-rdf-delta tidy
 
 fmt:
 	$(GO) fmt ./...
@@ -53,10 +54,19 @@ build-fusekictl:
 run-fusekictl:
 	$(GO) run ./cmd/fusekictl $(ARGS)
 
-helm-lint:
+release-sync:
+	bash ./hack/release/sync-metadata.sh
+
+release-verify:
+	bash ./hack/release/verify-sync.sh
+
+release-artifacts: release-sync bundle-refresh-crds
+	bash ./hack/release/package-artifacts.sh
+
+helm-lint: release-sync
 	helm lint ./charts/fuseki-operator
 
-helm-test:
+helm-test: release-sync
 	bash ./hack/helm/test-chart.sh
 
 bundle-refresh-crds:
@@ -64,10 +74,10 @@ bundle-refresh-crds:
 	cp ./config/crd/bases/*.yaml ./bundle/manifests/
 	rm -f ./bundle/manifests/kustomization.yaml
 
-bundle-validate: bundle-refresh-crds
+bundle-validate: release-sync bundle-refresh-crds
 	bash ./hack/olm/validate-bundle.sh
 
-bundle-build: bundle-refresh-crds
+bundle-build: release-sync bundle-refresh-crds
 	$(CONTAINER_TOOL) build -f bundle.Dockerfile -t $(BUNDLE_IMAGE) .
 
 tidy:

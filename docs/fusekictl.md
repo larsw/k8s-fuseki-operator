@@ -56,9 +56,9 @@ Limit the report to one namespace or emit JSON:
 Apply the core custom resources directly from typed CLI flags. The command creates the object if it does not exist and updates its `spec` if it already exists:
 
 ```sh
-./bin/fusekictl apply rdfdeltaserver example-delta --image ghcr.io/example/fuseki-operator/rdf-delta:latest -n default
+./bin/fusekictl apply rdfdeltaserver example-delta --image ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:latest -n default
 ./bin/fusekictl apply dataset example-dataset --dataset-name primary --spatial -n default
-./bin/fusekictl apply fusekicluster example --image ghcr.io/example/fuseki-operator/fuseki:6.0.0 --rdf-delta-server example-delta --dataset example-dataset -n default
+./bin/fusekictl apply fusekicluster example --image ghcr.io/larsw/k8s-fuseki-operator/fuseki:6.0.0 --rdf-delta-server example-delta --dataset example-dataset -n default
 ./bin/fusekictl apply restore example-restore --target example-delta --backup-object 20260308T120000Z-example-delta -n default
 ```
 
@@ -67,9 +67,9 @@ Apply the core custom resources directly from typed CLI flags. The command creat
 Create the core custom resources directly from typed CLI flags:
 
 ```sh
-./bin/fusekictl create rdfdeltaserver example-delta --image ghcr.io/example/fuseki-operator/rdf-delta:latest -n default
+./bin/fusekictl create rdfdeltaserver example-delta --image ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:latest -n default
 ./bin/fusekictl create dataset example-dataset --dataset-name primary --spatial -n default
-./bin/fusekictl create fusekicluster example --image ghcr.io/example/fuseki-operator/fuseki:6.0.0 --rdf-delta-server example-delta --dataset example-dataset -n default
+./bin/fusekictl create fusekicluster example --image ghcr.io/larsw/k8s-fuseki-operator/fuseki:6.0.0 --rdf-delta-server example-delta --dataset example-dataset -n default
 ```
 
 Delete those resources with the matching typed delete commands:

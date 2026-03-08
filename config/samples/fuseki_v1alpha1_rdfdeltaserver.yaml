@@ -3,7 +3,7 @@ kind: RDFDeltaServer
 metadata:
   name: example-delta
 spec:
-  image: ghcr.io/example/fuseki-operator/rdf-delta:latest
+  image: ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:latest
   replicas: 1
   servicePort: 1066
   storage:

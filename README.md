@@ -72,8 +72,12 @@ helm upgrade --install fuseki-operator ./charts/fuseki-operator \
 Validate the initial OLM bundle scaffold with:
 
 ```sh
+make release-sync
+make release-verify
 make bundle-validate
 ```
+
+For release preparation, the repository now treats `main` as the integration branch, `release/x.y` as stabilization branches, and `vX.Y.Z` tags as the trigger for draft GitHub Releases with packaged artifacts.
 
 ## Custom Fuseki Image
 

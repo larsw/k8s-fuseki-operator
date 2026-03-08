@@ -1,7 +1,7 @@
 fullnameOverride: fuseki-operator-controller-manager
 
 image:
-  repository: ghcr.io/example/fuseki-operator/controller
+  repository: ghcr.io/larsw/k8s-fuseki-operator/controller
   tag: dev
   pullPolicy: IfNotPresent
   pullSecrets: []

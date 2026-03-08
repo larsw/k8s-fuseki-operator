@@ -39,7 +39,7 @@ func TestApplyFusekiClusterUpdatesExistingSpec(t *testing.T) {
 	existing := buildFusekiCluster(fusekiClusterParams{
 		Namespace:      "default",
 		ResourceName:   "example",
-		Image:          "ghcr.io/example/fuseki-operator/fuseki:old",
+		Image:          "ghcr.io/larsw/k8s-fuseki-operator/fuseki:old",
 		Replicas:       1,
 		HTTPPort:       3030,
 		RDFDeltaServer: "old-delta",
@@ -49,7 +49,7 @@ func TestApplyFusekiClusterUpdatesExistingSpec(t *testing.T) {
 	desired := buildFusekiCluster(fusekiClusterParams{
 		Namespace:      "default",
 		ResourceName:   "example",
-		Image:          "ghcr.io/example/fuseki-operator/fuseki:new",
+		Image:          "ghcr.io/larsw/k8s-fuseki-operator/fuseki:new",
 		Replicas:       3,
 		HTTPPort:       4040,
 		RDFDeltaServer: "example-delta",
@@ -68,7 +68,7 @@ func TestApplyFusekiClusterUpdatesExistingSpec(t *testing.T) {
 	if err := kubeClient.Get(context.Background(), client.ObjectKey{Namespace: desired.Namespace, Name: desired.Name}, stored); err != nil {
 		t.Fatalf("get cluster: %v", err)
 	}
-	if stored.Spec.Image != "ghcr.io/example/fuseki-operator/fuseki:new" {
+	if stored.Spec.Image != "ghcr.io/larsw/k8s-fuseki-operator/fuseki:new" {
 		t.Fatalf("unexpected image: %q", stored.Spec.Image)
 	}
 	if stored.Spec.RDFDeltaServerRef.Name != "example-delta" {

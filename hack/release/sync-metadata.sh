@@ -1,188 +1,103 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+METADATA_FILE="${ROOT_DIR}/release/metadata.env"
+ALM_EXAMPLES_FILE="${ROOT_DIR}/bundle/alm-examples.json"
+CHART_FILE="${ROOT_DIR}/charts/fuseki-operator/Chart.yaml"
+VALUES_FILE="${ROOT_DIR}/charts/fuseki-operator/values.yaml"
+CSV_FILE="${ROOT_DIR}/bundle/manifests/fuseki-operator.clusterserviceversion.yaml"
+ANNOTATIONS_FILE="${ROOT_DIR}/bundle/metadata/annotations.yaml"
+
+. "${METADATA_FILE}"
+
+CHART_VERSION="${CHART_VERSION:-${RELEASE_VERSION}}"
+CHART_APP_VERSION="${CHART_APP_VERSION:-${CONTROLLER_IMAGE##*:}}"
+CONTROLLER_IMAGE_REPOSITORY="${CONTROLLER_IMAGE%:*}"
+CONTROLLER_IMAGE_TAG="${CONTROLLER_IMAGE##*:}"
+
+cat >"${CHART_FILE}" <<EOF
+apiVersion: v2
+name: fuseki-operator
+description: Helm chart for installing the fuseki-operator controller and CRDs
+type: application
+version: ${CHART_VERSION}
+appVersion: ${CHART_APP_VERSION}
+EOF
+
+cat >"${VALUES_FILE}" <<EOF
+fullnameOverride: fuseki-operator-controller-manager
+
+image:
+  repository: ${CONTROLLER_IMAGE_REPOSITORY}
+  tag: ${CONTROLLER_IMAGE_TAG}
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+replicaCount: 1
+leaderElection: true
+
+manager:
+  extraArgs: []
+
+podAnnotations: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+serviceAccount:
+  create: true
+  name: fuseki-operator-controller-manager
+  annotations: {}
+
+rbac:
+  clusterRoleName: fuseki-operator-manager-role
+  clusterRoleBindingName: fuseki-operator-manager-rolebinding
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+metricsService:
+  enabled: true
+  name: fuseki-operator-controller-manager-metrics
+  port: 8080
+  annotations: {}
+EOF
+
+cat >"${ANNOTATIONS_FILE}" <<EOF
+annotations:
+  operators.operatorframework.io.bundle.mediatype.v1: registry+v1
+  operators.operatorframework.io.bundle.manifests.v1: manifests/
+  operators.operatorframework.io.bundle.metadata.v1: metadata/
+  operators.operatorframework.io.bundle.package.v1: fuseki-operator
+  operators.operatorframework.io.bundle.channels.v1: ${BUNDLE_CHANNELS}
+  operators.operatorframework.io.bundle.channel.default.v1: ${BUNDLE_DEFAULT_CHANNEL}
+EOF
+
+cat >"${CSV_FILE}" <<EOF
 apiVersion: operators.coreos.com/v1alpha1
 kind: ClusterServiceVersion
 metadata:
-  name: fuseki-operator.v0.1.0
+  name: fuseki-operator.v${RELEASE_VERSION}
   annotations:
     alm-examples: |
-      [
-        {
-          "apiVersion": "fuseki.apache.org/v1alpha1",
-          "kind": "BackupPolicy",
-          "metadata": {
-            "name": "example-backuppolicy"
-          },
-          "spec": {
-            "schedule": "0 */6 * * *",
-            "s3": {
-              "endpoint": "https://minio.example.test",
-              "bucket": "fuseki-backups",
-              "prefix": "rdf-delta",
-              "credentialsSecretRef": {
-                "name": "example-backup-s3"
-              }
-            },
-            "retention": {
-              "maxBackups": 14
-            }
-          }
-        },
-        {
-          "apiVersion": "fuseki.apache.org/v1alpha1",
-          "kind": "Dataset",
-          "metadata": {
-            "name": "example-dataset"
-          },
-          "spec": {
-            "name": "primary",
-            "type": "TDB2",
-            "spatial": {
-              "enabled": true,
-              "assembler": "spatial:EntityMap",
-              "spatialIndexPath": "spatial"
-            }
-          }
-        },
-        {
-          "apiVersion": "fuseki.apache.org/v1alpha1",
-          "kind": "Endpoint",
-          "metadata": {
-            "name": "example-endpoint"
-          },
-          "spec": {
-            "targetRef": {
-              "kind": "FusekiCluster",
-              "name": "example"
-            },
-            "securityProfileRef": {
-              "name": "example-securityprofile"
-            },
-            "read": {
-              "annotations": {
-                "prometheus.io/scrape": "true"
-              }
-            },
-            "write": {
-              "annotations": {
-                "fuseki.apache.org/access": "write"
-              }
-            }
-          }
-        },
-        {
-          "apiVersion": "fuseki.apache.org/v1alpha1",
-          "kind": "FusekiCluster",
-          "metadata": {
-            "name": "example"
-          },
-          "spec": {
-            "replicas": 3,
-            "image": "ghcr.io/larsw/k8s-fuseki-operator/fuseki:6.0.0",
-            "httpPort": 3030,
-            "rdfDeltaServerRef": {
-              "name": "example-delta"
-            },
-            "datasetRefs": [
-              {
-                "name": "example-dataset"
-              }
-            ],
-            "storage": {
-              "accessMode": "ReadWriteOnce",
-              "size": "2Gi"
-            }
-          }
-        },
-        {
-          "apiVersion": "fuseki.apache.org/v1alpha1",
-          "kind": "FusekiServer",
-          "metadata": {
-            "name": "example-fusekiserver"
-          },
-          "spec": {
-            "image": "ghcr.io/example/fuseki:6.0.0",
-            "datasetRefs": [
-              {
-                "name": "example-dataset"
-              }
-            ]
-          }
-        },
-        {
-          "apiVersion": "fuseki.apache.org/v1alpha1",
-          "kind": "FusekiUI",
-          "metadata": {
-            "name": "example-fusekiui"
-          },
-          "spec": {
-            "targetRef": {
-              "kind": "FusekiCluster",
-              "name": "example"
-            },
-            "service": {
-              "annotations": {
-                "fuseki.apache.org/access": "web"
-              }
-            },
-            "ingress": {
-              "host": "fuseki.example.test",
-              "className": "nginx"
-            }
-          }
-        },
-        {
-          "apiVersion": "fuseki.apache.org/v1alpha1",
-          "kind": "RDFDeltaServer",
-          "metadata": {
-            "name": "example-delta"
-          },
-          "spec": {
-            "image": "ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:latest",
-            "replicas": 1,
-            "servicePort": 1066,
-            "storage": {
-              "accessMode": "ReadWriteOnce",
-              "size": "2Gi"
-            }
-          }
-        },
-        {
-          "apiVersion": "fuseki.apache.org/v1alpha1",
-          "kind": "RestoreRequest",
-          "metadata": {
-            "name": "example-restore"
-          },
-          "spec": {
-            "targetRef": {
-              "kind": "RDFDeltaServer",
-              "name": "example-delta"
-            },
-            "backupPolicyRef": {
-              "name": "example-backuppolicy"
-            },
-            "backupObject": "20260308T120000Z-example-delta"
-          }
-        },
-        {
-          "apiVersion": "fuseki.apache.org/v1alpha1",
-          "kind": "SecurityProfile",
-          "metadata": {
-            "name": "example-securityprofile"
-          },
-          "spec": {
-            "adminCredentialsSecretRef": {
-              "name": "example-admin-secret"
-            },
-            "tlsSecretRef": {
-              "name": "example-tls-secret"
-            },
-            "oidcIssuerURL": "https://issuer.example.com"
-          }
-        }
-      ]
+EOF
+sed 's/^/      /' "${ALM_EXAMPLES_FILE}" >>"${CSV_FILE}"
+printf '\n' >>"${CSV_FILE}"
+cat >>"${CSV_FILE}" <<EOF
     capabilities: Basic Install
     categories: Database
-    containerImage: ghcr.io/larsw/k8s-fuseki-operator/controller:dev
-    createdAt: "2026-03-08T00:00:00Z"
+    containerImage: ${CONTROLLER_IMAGE}
+    createdAt: "${BUNDLE_CREATED_AT}"
     description: Operator for Apache Jena Fuseki clusters, RDF Delta replication, security, and backup or restore workflows.
     operators.operatorframework.io/builder: manual
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
@@ -193,7 +108,7 @@ spec:
 
     The operator reconciles Fuseki clusters, RDF Delta servers, datasets, security profiles,
     ingress endpoints, UI resources, and backup or restore workflows.
-  version: 0.1.0
+  version: ${RELEASE_VERSION}
   maturity: alpha
   minKubeVersion: 1.33.0
   provider:
@@ -261,11 +176,11 @@ spec:
         description: Configures admin credentials, TLS, and identity-provider integration.
   relatedImages:
     - name: controller
-      image: ghcr.io/larsw/k8s-fuseki-operator/controller:dev
+      image: ${CONTROLLER_IMAGE}
     - name: fuseki
-      image: ghcr.io/larsw/k8s-fuseki-operator/fuseki:dev
+      image: ${FUSEKI_IMAGE}
     - name: rdf-delta
-      image: ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:dev
+      image: ${RDF_DELTA_IMAGE}
   install:
     strategy: deployment
     spec:
@@ -371,7 +286,7 @@ spec:
                 serviceAccountName: fuseki-operator-controller-manager
                 containers:
                   - name: manager
-                    image: ghcr.io/larsw/k8s-fuseki-operator/controller:dev
+                    image: ${CONTROLLER_IMAGE}
                     imagePullPolicy: IfNotPresent
                     command:
                       - /manager
@@ -389,3 +304,4 @@ spec:
                       limits:
                         cpu: 500m
                         memory: 512Mi
+EOF

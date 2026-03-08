@@ -18,7 +18,7 @@ spec:
       serviceAccountName: fuseki-operator-controller-manager
       containers:
         - name: manager
-          image: ghcr.io/example/fuseki-operator/controller:dev
+          image: ghcr.io/larsw/k8s-fuseki-operator/controller:dev
           imagePullPolicy: IfNotPresent
           command:
             - /manager

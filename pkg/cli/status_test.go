@@ -13,7 +13,7 @@ func TestRenderStatusTextIncludesKeySections(t *testing.T) {
 			Phase:           "Available",
 			ReadyReplicas:   1,
 			DesiredReplicas: 1,
-			Image:           "ghcr.io/example/fuseki-operator/controller:dev",
+			Image:           "ghcr.io/larsw/k8s-fuseki-operator/controller:dev",
 		},
 		FusekiClusters: []FusekiClusterStatusSummary{{
 			Namespace:        "default",

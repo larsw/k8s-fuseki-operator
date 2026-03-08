@@ -1,0 +1,175 @@
+[
+  {
+    "apiVersion": "fuseki.apache.org/v1alpha1",
+    "kind": "BackupPolicy",
+    "metadata": {
+      "name": "example-backuppolicy"
+    },
+    "spec": {
+      "schedule": "0 */6 * * *",
+      "s3": {
+        "endpoint": "https://minio.example.test",
+        "bucket": "fuseki-backups",
+        "prefix": "rdf-delta",
+        "credentialsSecretRef": {
+          "name": "example-backup-s3"
+        }
+      },
+      "retention": {
+        "maxBackups": 14
+      }
+    }
+  },
+  {
+    "apiVersion": "fuseki.apache.org/v1alpha1",
+    "kind": "Dataset",
+    "metadata": {
+      "name": "example-dataset"
+    },
+    "spec": {
+      "name": "primary",
+      "type": "TDB2",
+      "spatial": {
+        "enabled": true,
+        "assembler": "spatial:EntityMap",
+        "spatialIndexPath": "spatial"
+      }
+    }
+  },
+  {
+    "apiVersion": "fuseki.apache.org/v1alpha1",
+    "kind": "Endpoint",
+    "metadata": {
+      "name": "example-endpoint"
+    },
+    "spec": {
+      "targetRef": {
+        "kind": "FusekiCluster",
+        "name": "example"
+      },
+      "securityProfileRef": {
+        "name": "example-securityprofile"
+      },
+      "read": {
+        "annotations": {
+          "prometheus.io/scrape": "true"
+        }
+      },
+      "write": {
+        "annotations": {
+          "fuseki.apache.org/access": "write"
+        }
+      }
+    }
+  },
+  {
+    "apiVersion": "fuseki.apache.org/v1alpha1",
+    "kind": "FusekiCluster",
+    "metadata": {
+      "name": "example"
+    },
+    "spec": {
+      "replicas": 3,
+      "image": "ghcr.io/larsw/k8s-fuseki-operator/fuseki:6.0.0",
+      "httpPort": 3030,
+      "rdfDeltaServerRef": {
+        "name": "example-delta"
+      },
+      "datasetRefs": [
+        {
+          "name": "example-dataset"
+        }
+      ],
+      "storage": {
+        "accessMode": "ReadWriteOnce",
+        "size": "2Gi"
+      }
+    }
+  },
+  {
+    "apiVersion": "fuseki.apache.org/v1alpha1",
+    "kind": "FusekiServer",
+    "metadata": {
+      "name": "example-fusekiserver"
+    },
+    "spec": {
+      "image": "ghcr.io/example/fuseki:6.0.0",
+      "datasetRefs": [
+        {
+          "name": "example-dataset"
+        }
+      ]
+    }
+  },
+  {
+    "apiVersion": "fuseki.apache.org/v1alpha1",
+    "kind": "FusekiUI",
+    "metadata": {
+      "name": "example-fusekiui"
+    },
+    "spec": {
+      "targetRef": {
+        "kind": "FusekiCluster",
+        "name": "example"
+      },
+      "service": {
+        "annotations": {
+          "fuseki.apache.org/access": "web"
+        }
+      },
+      "ingress": {
+        "host": "fuseki.example.test",
+        "className": "nginx"
+      }
+    }
+  },
+  {
+    "apiVersion": "fuseki.apache.org/v1alpha1",
+    "kind": "RDFDeltaServer",
+    "metadata": {
+      "name": "example-delta"
+    },
+    "spec": {
+      "image": "ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:latest",
+      "replicas": 1,
+      "servicePort": 1066,
+      "storage": {
+        "accessMode": "ReadWriteOnce",
+        "size": "2Gi"
+      }
+    }
+  },
+  {
+    "apiVersion": "fuseki.apache.org/v1alpha1",
+    "kind": "RestoreRequest",
+    "metadata": {
+      "name": "example-restore"
+    },
+    "spec": {
+      "targetRef": {
+        "kind": "RDFDeltaServer",
+        "name": "example-delta"
+      },
+      "backupPolicyRef": {
+        "name": "example-backuppolicy"
+      },
+      "backupObject": "20260308T120000Z-example-delta"
+    }
+  },
+  {
+    "apiVersion": "fuseki.apache.org/v1alpha1",
+    "kind": "SecurityProfile",
+    "metadata": {
+      "name": "example-securityprofile"
+    },
+    "spec": {
+      "adminCredentialsSecretRef": {
+        "name": "example-admin-secret"
+      },
+      "tlsSecretRef": {
+        "name": "example-tls-secret"
+      },
+      "oidcIssuerURL": "https://issuer.example.com"
+    }
+  }
+]

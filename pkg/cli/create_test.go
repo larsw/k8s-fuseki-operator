@@ -29,13 +29,13 @@ func TestBuildRDFDeltaServerSetsRequestedFields(t *testing.T) {
 	resource := buildRDFDeltaServer(rdfDeltaServerParams{
 		Namespace:    "default",
 		ResourceName: "example-delta",
-		Image:        "ghcr.io/example/fuseki-operator/rdf-delta:latest",
+		Image:        "ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:latest",
 		Replicas:     2,
 		ServicePort:  1066,
 		BackupPolicy: "nightly",
 	})
 
-	if resource.Spec.Image != "ghcr.io/example/fuseki-operator/rdf-delta:latest" {
+	if resource.Spec.Image != "ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:latest" {
 		t.Fatalf("unexpected image: %q", resource.Spec.Image)
 	}
 	if resource.Spec.Replicas != 2 {
@@ -50,7 +50,7 @@ func TestBuildFusekiClusterSetsReferences(t *testing.T) {
 	resource := buildFusekiCluster(fusekiClusterParams{
 		Namespace:      "default",
 		ResourceName:   "example",
-		Image:          "ghcr.io/example/fuseki-operator/fuseki:6.0.0",
+		Image:          "ghcr.io/larsw/k8s-fuseki-operator/fuseki:6.0.0",
 		Replicas:       3,
 		HTTPPort:       3030,
 		RDFDeltaServer: "example-delta",

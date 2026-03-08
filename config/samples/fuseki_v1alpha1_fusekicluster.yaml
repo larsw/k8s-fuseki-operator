@@ -4,7 +4,7 @@ metadata:
   name: example
 spec:
   replicas: 3
-  image: ghcr.io/example/fuseki-operator/fuseki:6.0.0
+  image: ghcr.io/larsw/k8s-fuseki-operator/fuseki:6.0.0
   httpPort: 3030
   rdfDeltaServerRef:
     name: example-delta

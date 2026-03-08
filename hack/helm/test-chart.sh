@@ -87,7 +87,7 @@ EOF
 helm template fuseki-operator "${CHART_DIR}" -n fuseki-system -f "${OVERRIDE_VALUES}" >"${OVERRIDE_RENDER}"
 
 assert_contains "${OVERRIDE_RENDER}" "imagePullSecrets:"
-assert_contains "${OVERRIDE_RENDER}" "image: \"ghcr.io/example/fuseki-operator/controller:v0.1.0\""
+assert_contains "${OVERRIDE_RENDER}" "image: \"ghcr.io/larsw/k8s-fuseki-operator/controller:v0.1.0\""
 assert_contains "${OVERRIDE_RENDER}" "- name: registry-creds"
 assert_contains "${OVERRIDE_RENDER}" "- \"--zap-log-level=debug\""
 assert_contains "${OVERRIDE_RENDER}" "- \"--feature-gates=HelmValidation=true\""

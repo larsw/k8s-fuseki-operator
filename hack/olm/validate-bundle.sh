@@ -6,6 +6,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUNDLE_DIR="${ROOT_DIR}/bundle"
 CSV_FILE="${BUNDLE_DIR}/manifests/fuseki-operator.clusterserviceversion.yaml"
 ANNOTATIONS_FILE="${BUNDLE_DIR}/metadata/annotations.yaml"
+METADATA_FILE="${ROOT_DIR}/release/metadata.env"
+
+. "${METADATA_FILE}"
 
 assert_file() {
 	local path=$1
@@ -35,10 +38,13 @@ if [[ "${crd_count}" != "9" ]]; then
 fi
 
 assert_contains "${ANNOTATIONS_FILE}" "operators.operatorframework.io.bundle.package.v1: fuseki-operator"
-assert_contains "${ANNOTATIONS_FILE}" "operators.operatorframework.io.bundle.channels.v1: alpha"
-assert_contains "${CSV_FILE}" "name: fuseki-operator.v0.1.0"
+assert_contains "${ANNOTATIONS_FILE}" "operators.operatorframework.io.bundle.channels.v1: ${BUNDLE_CHANNELS}"
+assert_contains "${CSV_FILE}" "name: fuseki-operator.v${RELEASE_VERSION}"
 assert_contains "${CSV_FILE}" "displayName: Fuseki Operator"
-assert_contains "${CSV_FILE}" "containerImage: ghcr.io/example/fuseki-operator/controller:dev"
+assert_contains "${CSV_FILE}" "containerImage: ${CONTROLLER_IMAGE}"
+assert_contains "${CSV_FILE}" "\"kind\": \"BackupPolicy\""
+assert_contains "${CSV_FILE}" "\"kind\": \"FusekiServer\""
+assert_contains "${CSV_FILE}" "\"kind\": \"RestoreRequest\""
 
 for owned_crd in \
 	backuppolicies.fuseki.apache.org \

@@ -1,0 +1,62 @@
+name: release
+
+on:
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to package for a draft release build
+        required: false
+        default: main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@v4
+      - name: Install operator-sdk
+        run: bash ./hack/release/install-operator-sdk.sh
+      - name: Verify tag matches release metadata
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          . ./release/metadata.env
+          test "v${RELEASE_VERSION}" = "${GITHUB_REF_NAME}"
+      - name: Validate release inputs
+        run: |
+          make test
+          make release-verify
+          make bundle-validate
+      - name: Build release artifacts
+        run: |
+          RELEASE_COMMIT="${GITHUB_SHA::12}" \
+          RELEASE_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          DIST_DIR=dist \
+          make release-artifacts
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/*
+      - name: Create draft GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: dist/*
