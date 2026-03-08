@@ -9,7 +9,7 @@ JENA_VERSION ?=
 JENA_SHA512 ?=
 JENA_COMMANDS_SHA512 ?=
 
-CONTROLLER_GEN = $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen
+CONTROLLER_GEN = $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
 SETUP_ENVTEST = $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 ENVTEST_K8S_VERSION ?= 1.35.x
 
@@ -22,10 +22,10 @@ fmt:
 vet:
 	$(GO) vet ./...
 
-test:
+test: manifests
 	$(GO) test ./...
 
-envtest:
+envtest: manifests
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" $(GO) test ./internal/controller -run Envtest -count=1
 
 e2e-k3d-m3:
@@ -67,7 +67,7 @@ helm-lint: release-sync
 helm-test: release-sync
 	bash ./hack/helm/test-chart.sh
 
-bundle-refresh-crds:
+bundle-refresh-crds: manifests
 	mkdir -p bundle/manifests
 	cp ./config/crd/bases/*.yaml ./bundle/manifests/
 	rm -f ./bundle/manifests/kustomization.yaml
