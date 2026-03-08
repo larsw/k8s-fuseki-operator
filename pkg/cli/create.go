@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 
-	fusekiv1alpha1 "fuseki-operator/api/v1alpha1"
+	fusekiv1alpha1 "github.com/larsw/k8s-fuseki-operator/api/v1alpha1"
 )
 
 type createDatasetOptions struct {

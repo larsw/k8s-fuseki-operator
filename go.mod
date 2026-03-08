@@ -1,4 +1,4 @@
-module fuseki-operator
+module github.com/larsw/k8s-fuseki-operator
 
 go 1.25.0
 

@@ -8,6 +8,12 @@
 make build-fusekictl
 ```
 
+Or install the latest tagged CLI directly:
+
+```sh
+go install github.com/larsw/k8s-fuseki-operator/cmd/fusekictl@latest
+```
+
 Or run it directly from source:
 
 ```sh

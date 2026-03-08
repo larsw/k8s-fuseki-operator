@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"fuseki-operator/pkg/cli"
+	"github.com/larsw/k8s-fuseki-operator/pkg/cli"
 )
 
 func main() {

@@ -44,7 +44,7 @@ EOF
 helm package "${ROOT_DIR}/charts/fuseki-operator" --destination "${DIST_DIR}" >/dev/null
 tar -czf "${DIST_DIR}/fuseki-operator-bundle-v${RELEASE_VERSION}.tar.gz" -C "${ROOT_DIR}" bundle bundle.Dockerfile
 
-ldflags="-X fuseki-operator/pkg/version.Version=${RELEASE_VERSION} -X fuseki-operator/pkg/version.Commit=${RELEASE_COMMIT} -X fuseki-operator/pkg/version.Date=${RELEASE_DATE}"
+ldflags="-X github.com/larsw/k8s-fuseki-operator/pkg/version.Version=${RELEASE_VERSION} -X github.com/larsw/k8s-fuseki-operator/pkg/version.Commit=${RELEASE_COMMIT} -X github.com/larsw/k8s-fuseki-operator/pkg/version.Date=${RELEASE_DATE}"
 for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
 	goos="${platform%/*}"
 	goarch="${platform#*/}"

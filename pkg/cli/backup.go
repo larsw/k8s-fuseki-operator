@@ -13,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	fusekiv1alpha1 "fuseki-operator/api/v1alpha1"
+	fusekiv1alpha1 "github.com/larsw/k8s-fuseki-operator/api/v1alpha1"
 )
 
 type backupTriggerOptions struct {

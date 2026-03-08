@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"fuseki-operator/pkg/version"
+	"github.com/larsw/k8s-fuseki-operator/pkg/version"
 )
 
 type RootOptions struct {

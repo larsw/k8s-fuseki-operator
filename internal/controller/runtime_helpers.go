@@ -8,7 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	fusekiv1alpha1 "fuseki-operator/api/v1alpha1"
+	fusekiv1alpha1 "github.com/larsw/k8s-fuseki-operator/api/v1alpha1"
 )
 
 const (

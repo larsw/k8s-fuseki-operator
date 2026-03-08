@@ -14,12 +14,7 @@ This repository now includes working M3 through M5 operator flows plus the first
 
 ## Module Path
 
-The Go module path is currently set to `fuseki-operator` so the repository can be scaffolded before a final git remote exists. If this project gets published under a different canonical import path, update it with:
-
-```sh
-go mod edit -module <final-module-path>
-go mod tidy
-```
+The canonical Go module path is `github.com/larsw/k8s-fuseki-operator`.
 
 ## Quick Start
 
@@ -45,6 +40,12 @@ Build the CLI with:
 
 ```sh
 make build-fusekictl
+```
+
+Or install it directly from the published module path with:
+
+```sh
+go install github.com/larsw/k8s-fuseki-operator/cmd/fusekictl@latest
 ```
 
 Install the operator from the packaged bundle with:

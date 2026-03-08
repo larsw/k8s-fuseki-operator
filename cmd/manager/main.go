@@ -12,9 +12,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	fusekiv1alpha1 "fuseki-operator/api/v1alpha1"
-	fusekicontroller "fuseki-operator/internal/controller"
-	"fuseki-operator/pkg/version"
+	fusekiv1alpha1 "github.com/larsw/k8s-fuseki-operator/api/v1alpha1"
+	fusekicontroller "github.com/larsw/k8s-fuseki-operator/internal/controller"
+	"github.com/larsw/k8s-fuseki-operator/pkg/version"
 )
 
 var scheme = runtimeScheme()

@@ -20,7 +20,7 @@ ARG DATE=unknown
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 	go build -trimpath \
-		-ldflags="-s -w -X fuseki-operator/pkg/version.Version=${VERSION} -X fuseki-operator/pkg/version.Commit=${COMMIT} -X fuseki-operator/pkg/version.Date=${DATE}" \
+		-ldflags="-s -w -X github.com/larsw/k8s-fuseki-operator/pkg/version.Version=${VERSION} -X github.com/larsw/k8s-fuseki-operator/pkg/version.Commit=${COMMIT} -X github.com/larsw/k8s-fuseki-operator/pkg/version.Date=${DATE}" \
 		-o /workspace/manager ./cmd/manager
 
 FROM gcr.io/distroless/static-debian12:nonroot

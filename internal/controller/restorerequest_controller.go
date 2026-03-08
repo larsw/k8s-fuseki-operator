@@ -19,7 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	fusekiv1alpha1 "fuseki-operator/api/v1alpha1"
+	fusekiv1alpha1 "github.com/larsw/k8s-fuseki-operator/api/v1alpha1"
 )
 
 const restoreCompletedConditionType = "RestoreCompleted"
