@@ -421,6 +421,75 @@ func TestFusekiClusterReconcileCreatesObservabilityResources(t *testing.T) {
 	}
 }
 
+func TestFusekiClusterReconcilePropagatesAffinity(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+
+	cluster := &fusekiv1alpha1.FusekiCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "example", Namespace: "default"},
+		Spec: fusekiv1alpha1.FusekiClusterSpec{
+			Image:             "ghcr.io/example/fuseki:6.0.0",
+			RDFDeltaServerRef: corev1.LocalObjectReference{Name: "delta"},
+			Affinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+							MatchExpressions: []corev1.NodeSelectorRequirement{{
+								Key:      "node-role.kubernetes.io/fuseki",
+								Operator: corev1.NodeSelectorOpIn,
+								Values:   []string{"true"},
+							}},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.FusekiCluster{}).
+		WithObjects(cluster).
+		Build()
+
+	reconciler := &FusekiClusterReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cluster)}); err != nil {
+		t.Fatalf("reconcile cluster: %v", err)
+	}
+
+	statefulSet := &appsv1.StatefulSet{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "example"}, statefulSet); err != nil {
+		t.Fatalf("get statefulset: %v", err)
+	}
+	if statefulSet.Spec.Template.Spec.Affinity == nil || statefulSet.Spec.Template.Spec.Affinity.NodeAffinity == nil {
+		t.Fatalf("expected statefulset affinity to be configured, got %#v", statefulSet.Spec.Template.Spec.Affinity)
+	}
+	selector := statefulSet.Spec.Template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if selector == nil || len(selector.NodeSelectorTerms) != 1 {
+		t.Fatalf("expected a required node selector term, got %#v", selector)
+	}
+	if len(selector.NodeSelectorTerms[0].MatchExpressions) != 1 {
+		t.Fatalf("expected one match expression, got %#v", selector.NodeSelectorTerms[0].MatchExpressions)
+	}
+	expression := selector.NodeSelectorTerms[0].MatchExpressions[0]
+	if expression.Key != "node-role.kubernetes.io/fuseki" {
+		t.Fatalf("unexpected node affinity key: %q", expression.Key)
+	}
+	if expression.Operator != corev1.NodeSelectorOpIn {
+		t.Fatalf("unexpected node affinity operator: %q", expression.Operator)
+	}
+	if len(expression.Values) != 1 || expression.Values[0] != "true" {
+		t.Fatalf("unexpected node affinity values: %#v", expression.Values)
+	}
+}
+
 func TestFusekiClusterReconcileIgnoresBootstrapPodsForLeaseSelection(t *testing.T) {
 	t.Helper()
 

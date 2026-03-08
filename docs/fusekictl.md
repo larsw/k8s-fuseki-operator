@@ -28,6 +28,18 @@ The current install flow uses the repository's `config/default` kustomize bundle
 ./bin/fusekictl install
 ```
 
+By default, `install` uses the same controller image tag as the running `fusekictl` version. Override only the official tag with:
+
+```sh
+./bin/fusekictl install --tag v0.1.1
+```
+
+Or override the full controller image reference entirely with:
+
+```sh
+./bin/fusekictl install --image ghcr.io/example/custom-controller:v0.1.1
+```
+
 If you are not running the command from the repository, point it at the bundle explicitly:
 
 ```sh

@@ -13,6 +13,16 @@ spec:
   storage:
     accessMode: ReadWriteOnce
     size: 2Gi
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: node-role.kubernetes.io/fuseki
+                operator: In
+                values:
+                  - "true"
   observability:
     metrics:
       service:

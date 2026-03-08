@@ -285,6 +285,10 @@ func (r *FusekiClusterReconciler) reconcileStatefulSet(ctx context.Context, clus
 		if cluster.Spec.Observability.Logging != nil {
 			statefulSet.Spec.Template.ObjectMeta.Annotations = mergeStringMaps(nil, cluster.Spec.Observability.Logging.PodAnnotations)
 		}
+		statefulSet.Spec.Template.Spec.Affinity = nil
+		if cluster.Spec.Affinity != nil {
+			statefulSet.Spec.Template.Spec.Affinity = cluster.Spec.Affinity.DeepCopy()
+		}
 		statefulSet.Spec.Template.Spec.TerminationGracePeriodSeconds = ptrTo(int64(30))
 		statefulSet.Spec.Template.Spec.Containers = []corev1.Container{fusekiContainer(cluster, securityProfile, adminSecretRef)}
 		volumes := []corev1.Volume{

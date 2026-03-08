@@ -54,6 +54,8 @@ Install the operator from the packaged bundle with:
 ./bin/fusekictl install
 ```
 
+`fusekictl install` defaults the controller image tag to the current `fusekictl` version. Use `--tag` to change only the official GHCR tag or `--image` to replace the full controller image reference.
+
 Install the operator with Helm using the initial chart with:
 
 ```sh
@@ -66,7 +68,7 @@ Override the controller image tag or pin scheduling-related values with a small 
 ```sh
 helm upgrade --install fuseki-operator ./charts/fuseki-operator \
 	-n fuseki-system --create-namespace \
-	--set image.tag=v0.1.0 \
+	--set image.tag=v0.1.1 \
 	--set nodeSelector."kubernetes\.io/os"=linux
 ```
 

@@ -54,6 +54,9 @@ type FusekiClusterSpec struct {
 	LeaderElection     FusekiLeaderElectionSpec     `json:"leaderElection,omitempty"`
 	Services           FusekiClusterServiceSpec     `json:"services,omitempty"`
 	Observability      WorkloadObservabilitySpec    `json:"observability,omitempty"`
+
+	// Affinity configures pod scheduling constraints for Fuseki server pods.
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 }
 
 type FusekiClusterStorageSpec struct {
