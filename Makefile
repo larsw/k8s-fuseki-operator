@@ -4,10 +4,7 @@ CONTAINER_TOOL ?= docker
 -include images/fuseki/versions.mk
 -include release/metadata.env
 
-IMG ?= ghcr.io/larsw/k8s-fuseki-operator/controller:dev
-FUSEKI_IMAGE ?= ghcr.io/larsw/k8s-fuseki-operator/fuseki:dev
-RDF_DELTA_IMAGE ?= ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:dev
-BUNDLE_IMAGE ?= ghcr.io/larsw/k8s-fuseki-operator/bundle:dev
+IMG ?= ${CONTROLLER_IMAGE}
 JENA_VERSION ?=
 JENA_SHA512 ?=
 JENA_COMMANDS_SHA512 ?=
@@ -17,6 +14,7 @@ SETUP_ENVTEST = $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@lat
 ENVTEST_K8S_VERSION ?= 1.35.x
 
 .PHONY: fmt vet test envtest e2e-k3d-m3 e2e-k3d-m4-oidc e2e-k3d-m4-tls e2e-k3d-m5-backup-restore e2e-k3d-fusekiui-ingress run build-fusekictl run-fusekictl release-sync release-verify release-artifacts helm-lint helm-test bundle-refresh-crds bundle-validate bundle-build generate manifests docker-build-fuseki docker-build-rdf-delta docker-smoke-fuseki docker-smoke-rdf-delta tidy
+.PHONY: docker-build-controller docker-smoke-controller
 
 fmt:
 	$(GO) fmt ./...
@@ -79,6 +77,34 @@ bundle-validate: release-sync bundle-refresh-crds
 
 bundle-build: release-sync bundle-refresh-crds
 	$(CONTAINER_TOOL) build -f bundle.Dockerfile -t $(BUNDLE_IMAGE) .
+
+docker-build-controller:
+	$(CONTAINER_TOOL) build \
+		--build-arg VERSION=$(RELEASE_VERSION) \
+		--build-arg COMMIT=$$(git rev-parse --short=12 HEAD 2>/dev/null || echo none) \
+		--build-arg DATE=$$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+		-t $(IMG) \
+		-f images/controller/Dockerfile .
+
+docker-smoke-controller: docker-build-controller
+	set -eu; \
+	output_file=$$(mktemp); \
+	trap 'rm -f "'$$output_file'"' EXIT; \
+	set +e; \
+	$(CONTAINER_TOOL) run --rm --entrypoint /manager $(IMG) --help >"$$output_file" 2>&1; \
+	exit_code=$$?; \
+	set -e; \
+	if [ $$exit_code -ne 0 ] && [ $$exit_code -ne 2 ]; then \
+		cat "$$output_file"; \
+		echo "controller image smoke test failed" >&2; \
+		exit $$exit_code; \
+	fi; \
+	grep -q -- 'metrics-bind-address' "$$output_file" || { \
+		cat "$$output_file"; \
+		echo "controller image smoke test did not print manager help output" >&2; \
+		exit 1; \
+	}; \
+	echo "Controller image smoke test passed"
 
 tidy:
 	$(GO) mod tidy

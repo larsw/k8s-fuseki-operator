@@ -30,6 +30,17 @@ rm -f "${DIST_DIR}"/*
 
 bash "${ROOT_DIR}/hack/release/sync-metadata.sh"
 
+cat > "${DIST_DIR}/image-refs.txt" <<EOF
+controller_release=${CONTROLLER_IMAGE_REPOSITORY}:${RELEASE_IMAGE_TAG}
+controller_floating=${CONTROLLER_IMAGE_REPOSITORY}:${RELEASE_IMAGE_FLOATING_TAG}
+fuseki_release=${FUSEKI_IMAGE_REPOSITORY}:${RELEASE_IMAGE_TAG}
+fuseki_floating=${FUSEKI_IMAGE_REPOSITORY}:${RELEASE_IMAGE_FLOATING_TAG}
+rdf_delta_release=${RDF_DELTA_IMAGE_REPOSITORY}:${RELEASE_IMAGE_TAG}
+rdf_delta_floating=${RDF_DELTA_IMAGE_REPOSITORY}:${RELEASE_IMAGE_FLOATING_TAG}
+bundle_release=${BUNDLE_IMAGE_REPOSITORY}:${RELEASE_IMAGE_TAG}
+bundle_floating=${BUNDLE_IMAGE_REPOSITORY}:${RELEASE_IMAGE_FLOATING_TAG}
+EOF
+
 helm package "${ROOT_DIR}/charts/fuseki-operator" --destination "${DIST_DIR}" >/dev/null
 tar -czf "${DIST_DIR}/fuseki-operator-bundle-v${RELEASE_VERSION}.tar.gz" -C "${ROOT_DIR}" bundle bundle.Dockerfile
 

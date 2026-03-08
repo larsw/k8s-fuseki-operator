@@ -84,6 +84,8 @@ For release preparation, the repository now treats `main` as the integration bra
 The image scaffold is pinned through [images/fuseki/versions.mk](images/fuseki/versions.mk), which currently tracks Apache Jena Fuseki 6.0.0. You can override those values on the command line if needed:
 
 ```sh
+make docker-build-controller
+make docker-smoke-controller
 make docker-build-fuseki
 make docker-smoke-fuseki
 ```

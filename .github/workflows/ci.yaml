@@ -55,3 +55,10 @@ jobs:
         run: make docker-smoke-fuseki
       - name: Smoke test RDF Delta image scaffold
         run: make docker-smoke-rdf-delta
+
+  controller-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Smoke test controller image scaffold
+        run: make docker-smoke-controller

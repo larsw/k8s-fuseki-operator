@@ -6,6 +6,7 @@ The repository now carries the first M6 packaging surfaces for both Helm and OLM
 - OLM bundle scaffold: `bundle/`
 - Release metadata source: `release/metadata.env`
 - GitHub release workflows: `.github/workflows/ci.yaml` and `.github/workflows/release.yaml`
+- Controller image Dockerfile: `images/controller/Dockerfile`
 
 The checked-in chart metadata, default chart image tag, bundle annotations, and CSV release fields are generated from `release/metadata.env` via:
 
@@ -17,6 +18,15 @@ CI also enforces that the generated packaging files stay in sync:
 
 ```sh
 make release-verify
+```
+
+The same metadata file now also defines the published image repositories plus the release and floating tags used by the GitHub release workflow.
+
+The repository now also includes a first operator controller image build path:
+
+```sh
+make docker-build-controller
+make docker-smoke-controller
 ```
 
 ## Helm
@@ -85,6 +95,22 @@ That target currently packages:
 - the Helm chart tarball
 - a tarball containing the OLM bundle scaffold
 - `fusekictl` binaries for Linux and macOS on amd64 and arm64
+- an `image-refs.txt` manifest for the published controller, Fuseki, RDF Delta, and bundle images
 - a `checksums.txt` file for the generated artifacts
 
 Pushing a `vX.Y.Z` tag triggers `.github/workflows/release.yaml`, which validates the repo, builds the same artifact set, uploads it to the workflow run, and creates a draft GitHub Release.
+
+On tag pushes, that workflow now also builds and publishes the controller image to GHCR as:
+
+- `${CONTROLLER_IMAGE_REPOSITORY}:${RELEASE_IMAGE_TAG}`
+- `${CONTROLLER_IMAGE_REPOSITORY}:${RELEASE_IMAGE_FLOATING_TAG}`
+
+The same tag push now also publishes:
+
+- `${FUSEKI_IMAGE_REPOSITORY}:${RELEASE_IMAGE_TAG}` and `${FUSEKI_IMAGE_REPOSITORY}:${RELEASE_IMAGE_FLOATING_TAG}`
+- `${RDF_DELTA_IMAGE_REPOSITORY}:${RELEASE_IMAGE_TAG}` and `${RDF_DELTA_IMAGE_REPOSITORY}:${RELEASE_IMAGE_FLOATING_TAG}`
+- `${BUNDLE_IMAGE_REPOSITORY}:${RELEASE_IMAGE_TAG}` and `${BUNDLE_IMAGE_REPOSITORY}:${RELEASE_IMAGE_FLOATING_TAG}`
+
+The controller image is built from `images/controller/Dockerfile` and embeds release version metadata into the manager binary via Go linker flags.
+
+The bundle image is built from `bundle.Dockerfile`, so a release tag now produces the full OLM install image alongside the runtime images.

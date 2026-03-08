@@ -13,14 +13,105 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  publish-images:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Load release metadata
+        id: meta
+        run: |
+          . ./release/metadata.env
+          test "${RELEASE_IMAGE_TAG}" = "${GITHUB_REF_NAME}"
+          {
+            echo "release_version=${RELEASE_VERSION}"
+            echo "release_image_tag=${RELEASE_IMAGE_TAG}"
+            echo "release_image_floating_tag=${RELEASE_IMAGE_FLOATING_TAG}"
+            echo "controller_repo=${CONTROLLER_IMAGE_REPOSITORY}"
+            echo "fuseki_repo=${FUSEKI_IMAGE_REPOSITORY}"
+            echo "rdf_delta_repo=${RDF_DELTA_IMAGE_REPOSITORY}"
+            echo "bundle_repo=${BUNDLE_IMAGE_REPOSITORY}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Load Jena build inputs
+        id: jena
+        run: |
+          eval "$(sed -n 's/^\([A-Z_][A-Z0-9_]*\) ?= \(.*\)$/\1=\2/p' ./images/fuseki/versions.mk)"
+          {
+            echo "jena_version=${JENA_VERSION}"
+            echo "jena_sha512=${JENA_SHA512}"
+            echo "jena_commands_sha512=${JENA_COMMANDS_SHA512}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Compute build metadata
+        id: build-meta
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push controller image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: images/controller/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.controller_repo }}:${{ steps.meta.outputs.release_image_tag }}
+            ${{ steps.meta.outputs.controller_repo }}:${{ steps.meta.outputs.release_image_floating_tag }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.release_version }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ steps.build-meta.outputs.date }}
+      - name: Build and push Fuseki image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: images/fuseki/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.fuseki_repo }}:${{ steps.meta.outputs.release_image_tag }}
+            ${{ steps.meta.outputs.fuseki_repo }}:${{ steps.meta.outputs.release_image_floating_tag }}
+          build-args: |
+            JENA_VERSION=${{ steps.jena.outputs.jena_version }}
+            JENA_SHA512=${{ steps.jena.outputs.jena_sha512 }}
+      - name: Build and push RDF Delta image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: images/rdf-delta/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.rdf_delta_repo }}:${{ steps.meta.outputs.release_image_tag }}
+            ${{ steps.meta.outputs.rdf_delta_repo }}:${{ steps.meta.outputs.release_image_floating_tag }}
+          build-args: |
+            JENA_VERSION=${{ steps.jena.outputs.jena_version }}
+            JENA_COMMANDS_SHA512=${{ steps.jena.outputs.jena_commands_sha512 }}
+      - name: Build and push OLM bundle image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bundle.Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.bundle_repo }}:${{ steps.meta.outputs.release_image_tag }}
+            ${{ steps.meta.outputs.bundle_repo }}:${{ steps.meta.outputs.release_image_floating_tag }}
+
   package-release:
     runs-on: ubuntu-latest
+    needs:
+      - publish-images
+    if: github.event_name == 'workflow_dispatch' || needs.publish-images.result == 'success'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,12 +127,13 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           . ./release/metadata.env
-          test "v${RELEASE_VERSION}" = "${GITHUB_REF_NAME}"
+          test "${RELEASE_IMAGE_TAG}" = "${GITHUB_REF_NAME}"
       - name: Validate release inputs
         run: |
           make test
           make release-verify
           make bundle-validate
+          make docker-smoke-controller
       - name: Build release artifacts
         run: |
           RELEASE_COMMIT="${GITHUB_SHA::12}" \
