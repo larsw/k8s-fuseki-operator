@@ -9,7 +9,8 @@ JENA_VERSION ?=
 JENA_SHA512 ?=
 JENA_COMMANDS_SHA512 ?=
 
-CONTROLLER_GEN = $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
+CONTROLLER_GEN ?= $(abspath ./bin/controller-gen)
+CONTROLLER_GEN_VERSION ?= v0.20.1
 SETUP_ENVTEST = $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 ENVTEST_K8S_VERSION ?= 1.35.x
 
@@ -109,10 +110,13 @@ docker-smoke-controller: docker-build-controller
 tidy:
 	$(GO) mod tidy
 
-generate:
+$(CONTROLLER_GEN):
+	GOBIN=$(abspath ./bin) $(GO) install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+
+generate: $(CONTROLLER_GEN)
 	$(CONTROLLER_GEN) object paths="./api/..."
 
-manifests:
+manifests: $(CONTROLLER_GEN)
 	mkdir -p config/crd/bases
 	$(MAKE) generate
 	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=config/crd/bases
