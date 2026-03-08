@@ -246,6 +246,87 @@ func TestFusekiServerReconcileDefersBootstrapUntilSecurityReady(t *testing.T) {
 	}
 }
 
+func TestFusekiServerReconcileWithoutSecurityProfileDoesNotInjectAdminPassword(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add batch scheme: %v", err)
+	}
+
+	dataset := &fusekiv1alpha1.Dataset{
+		ObjectMeta: metav1.ObjectMeta{Name: "dataset-a", Namespace: "default"},
+		Spec:       fusekiv1alpha1.DatasetSpec{Name: "primary"},
+	}
+	server := &fusekiv1alpha1.FusekiServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "standalone", Namespace: "default"},
+		Spec: fusekiv1alpha1.FusekiServerSpec{
+			Image:       "ghcr.io/example/fuseki:6.0.0",
+			DatasetRefs: []corev1.LocalObjectReference{{Name: "dataset-a"}},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.Dataset{}).
+		WithStatusSubresource(&fusekiv1alpha1.FusekiServer{}).
+		WithObjects(server, dataset).
+		Build()
+
+	datasetReconciler := &DatasetReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := datasetReconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dataset)}); err != nil {
+		t.Fatalf("reconcile dataset: %v", err)
+	}
+
+	reconciler := &FusekiServerReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(server)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "standalone"}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "ADMIN_PASSWORD"); got != "" {
+		t.Fatalf("expected no runtime admin password env var, got %q", got)
+	}
+	if secretName := envVarSecretRefName(deployment.Spec.Template.Spec.Containers[0].Env, "ADMIN_PASSWORD"); secretName != "" {
+		t.Fatalf("expected no runtime admin password secret ref, got %q", secretName)
+	}
+
+	job := &batchv1.Job{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "server-standalone-dataset-a-bootstrap"}, job); err != nil {
+		t.Fatalf("get bootstrap job: %v", err)
+	}
+	if got := envVarValue(job.Spec.Template.Spec.Containers[0].Env, "FUSEKI_ADMIN_PASSWORD"); got != "" {
+		t.Fatalf("expected no bootstrap admin password env var, got %q", got)
+	}
+	if secretName := envVarSecretRefName(job.Spec.Template.Spec.Containers[0].Env, "FUSEKI_ADMIN_PASSWORD"); secretName != "" {
+		t.Fatalf("expected no bootstrap admin password secret ref, got %q", secretName)
+	}
+	if got := envVarValue(job.Spec.Template.Spec.Containers[0].Env, "FUSEKI_WRITE_URL"); got != "http://standalone:3030" {
+		t.Fatalf("unexpected job write url: %q", got)
+	}
+
+	updated := &fusekiv1alpha1.FusekiServer{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(server), updated); err != nil {
+		t.Fatalf("get updated server: %v", err)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, securityReadyConditionType)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "SecurityProfileNotConfigured" {
+		t.Fatalf("unexpected security condition: %#v", condition)
+	}
+	if updated.Status.Phase != "Provisioning" {
+		t.Fatalf("unexpected server phase: %q", updated.Status.Phase)
+	}
+}
+
 func TestFusekiServerReconcileCreatesObservabilityResources(t *testing.T) {
 	t.Helper()
 

@@ -4,4 +4,5 @@ resources:
   - fuseki_v1alpha1_rdfdeltaserver.yaml
   - fuseki_v1alpha1_dataset.yaml
   - fuseki_v1alpha1_endpoint.yaml
+  - fuseki_v1alpha1_fusekiui.yaml
   - fuseki_v1alpha1_securityprofile.yaml

@@ -14,7 +14,7 @@ RUN set -eux; \
     test -n "${JENA_VERSION}"; \
     test -n "${JENA_SHA512}"; \
     apk -U upgrade; \
-    apk add --no-cache bash curl ca-certificates coreutils findutils gettext pwgen tini; \
+    apk add --no-cache bash curl ca-certificates coreutils findutils gettext tini; \
     mkdir -p /tmp/download
 
 WORKDIR /tmp/download

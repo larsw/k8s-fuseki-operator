@@ -5,14 +5,8 @@ set -euo pipefail
 initialize_base() {
   mkdir -p "${FUSEKI_BASE}/databases"
 
-  if [[ ! -f "${FUSEKI_BASE}/shiro.ini" ]]; then
+  if [[ -n "${ADMIN_PASSWORD:-}" ]] && [[ ! -f "${FUSEKI_BASE}/shiro.ini" ]]; then
     cp "${FUSEKI_HOME}/shiro.ini" "${FUSEKI_BASE}/shiro.ini"
-
-    if [[ -z "${ADMIN_PASSWORD:-}" ]]; then
-      ADMIN_PASSWORD="$(pwgen -s 20 1)"
-      export ADMIN_PASSWORD
-      echo "Generated Fuseki admin password: ${ADMIN_PASSWORD}"
-    fi
   fi
 
   if [[ -n "${ADMIN_PASSWORD:-}" ]] && [[ -f "${FUSEKI_BASE}/shiro.ini" ]]; then

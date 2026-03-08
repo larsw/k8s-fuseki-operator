@@ -327,6 +327,75 @@ type EndpointList struct {
 	Items           []Endpoint `json:"items"`
 }
 
+type FusekiUISpec struct {
+	TargetRef EndpointTargetRef    `json:"targetRef"`
+	Service   EndpointServiceSpec  `json:"service,omitempty"`
+	Ingress   *FusekiUIIngressSpec `json:"ingress,omitempty"`
+	Gateway   *FusekiUIGatewaySpec `json:"gateway,omitempty"`
+}
+
+type FusekiUIIngressSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	Host string `json:"host"`
+
+	// +kubebuilder:default="/"
+	Path string `json:"path,omitempty"`
+
+	// +kubebuilder:validation:MinLength=1
+	ClassName string `json:"className,omitempty"`
+
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	TLSSecretRef *corev1.LocalObjectReference `json:"tlsSecretRef,omitempty"`
+}
+
+type FusekiUIGatewayParentRef struct {
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	Namespace string `json:"namespace,omitempty"`
+
+	SectionName string `json:"sectionName,omitempty"`
+}
+
+type FusekiUIGatewaySpec struct {
+	// +kubebuilder:validation:MinItems=1
+	ParentRefs []FusekiUIGatewayParentRef `json:"parentRefs"`
+
+	Hostnames []string `json:"hostnames,omitempty"`
+
+	// +kubebuilder:default="/"
+	Path string `json:"path,omitempty"`
+
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+type FusekiUIStatus struct {
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	Phase              string             `json:"phase,omitempty"`
+	ServiceName        string             `json:"serviceName,omitempty"`
+	IngressName        string             `json:"ingressName,omitempty"`
+	HTTPRouteName      string             `json:"httpRouteName,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+type FusekiUI struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   FusekiUISpec   `json:"spec,omitempty"`
+	Status FusekiUIStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type FusekiUIList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []FusekiUI `json:"items"`
+}
+
 type SecurityProfileSpec struct {
 	AdminCredentialsSecretRef *corev1.LocalObjectReference `json:"adminCredentialsSecretRef,omitempty"`
 	TLSSecretRef              *corev1.LocalObjectReference `json:"tlsSecretRef,omitempty"`
@@ -450,6 +519,8 @@ func init() {
 		&DatasetList{},
 		&Endpoint{},
 		&EndpointList{},
+		&FusekiUI{},
+		&FusekiUIList{},
 		&SecurityProfile{},
 		&SecurityProfileList{},
 		&BackupPolicy{},
@@ -703,6 +774,46 @@ func (in *Endpoint) DesiredWriteServiceType() corev1.ServiceType {
 	}
 
 	return corev1.ServiceTypeClusterIP
+}
+
+func (in *FusekiUI) ServiceName() string {
+	if in.Spec.Service.Name != "" {
+		return in.Spec.Service.Name
+	}
+
+	return in.Name
+}
+
+func (in *FusekiUI) DesiredServiceType() corev1.ServiceType {
+	if in.Spec.Service.Type != "" {
+		return in.Spec.Service.Type
+	}
+
+	return corev1.ServiceTypeClusterIP
+}
+
+func (in *FusekiUI) IngressName() string {
+	return in.Name
+}
+
+func (in *FusekiUI) HTTPRouteName() string {
+	return in.Name + "-route"
+}
+
+func (in *FusekiUI) DesiredIngressPath() string {
+	if in.Spec.Ingress != nil && in.Spec.Ingress.Path != "" {
+		return in.Spec.Ingress.Path
+	}
+
+	return "/"
+}
+
+func (in *FusekiUI) DesiredGatewayPath() string {
+	if in.Spec.Gateway != nil && in.Spec.Gateway.Path != "" {
+		return in.Spec.Gateway.Path
+	}
+
+	return "/"
 }
 
 func (in *FusekiServer) DesiredHTTPPort() int32 {

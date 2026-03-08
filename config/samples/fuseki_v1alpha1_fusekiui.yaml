@@ -1,0 +1,23 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: FusekiUI
+metadata:
+  name: example-fusekiui
+spec:
+  targetRef:
+    kind: FusekiCluster
+    name: example-fusekicluster
+  service:
+    annotations:
+      fuseki.apache.org/access: web
+  ingress:
+    host: fuseki.example.test
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: HTTP
+  gateway:
+    parentRefs:
+      - name: shared-gateway
+        namespace: infra
+        sectionName: web
+    hostnames:
+      - fuseki.example.test
