@@ -826,8 +826,9 @@ func readyPod(namespace, clusterName, name string) *corev1.Pod {
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name":    "fuseki",
-				"fuseki.apache.org/cluster": clusterName,
+				"app.kubernetes.io/name":      "fuseki",
+				"fuseki.apache.org/cluster":   clusterName,
+				"fuseki.apache.org/component": "server",
 			},
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "fuseki", Image: "ghcr.io/example/fuseki:6.0.0"}}},

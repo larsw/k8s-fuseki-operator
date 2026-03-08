@@ -1,0 +1,5 @@
+#!/bin/sh
+
+set -eu
+
+exec "${JAVA_HOME}/bin/java" ${JVM_ARGS:-} -cp "/opt/rdf-delta/lib/*:/opt/rdf-delta/rdf-delta-server.jar" RDFDeltaServer "$@"

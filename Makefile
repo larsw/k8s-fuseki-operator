@@ -5,15 +5,16 @@ CONTAINER_TOOL ?= docker
 
 IMG ?= ghcr.io/example/fuseki-operator/controller:dev
 FUSEKI_IMAGE ?= ghcr.io/example/fuseki-operator/fuseki:dev
-RDF_DELTA_MOCK_IMAGE ?= ghcr.io/example/fuseki-operator/rdf-delta-mock:dev
+RDF_DELTA_IMAGE ?= ghcr.io/example/fuseki-operator/rdf-delta:dev
 JENA_VERSION ?=
 JENA_SHA512 ?=
+JENA_COMMANDS_SHA512 ?=
 
 CONTROLLER_GEN = $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen
 SETUP_ENVTEST = $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 ENVTEST_K8S_VERSION ?= 1.35.x
 
-.PHONY: fmt vet test envtest e2e-k3d-m3 e2e-k3d-m4-oidc e2e-k3d-m4-tls e2e-k3d-fusekiui-ingress run generate manifests docker-build-fuseki docker-build-rdf-delta-mock docker-smoke-fuseki tidy
+.PHONY: fmt vet test envtest e2e-k3d-m3 e2e-k3d-m4-oidc e2e-k3d-m4-tls e2e-k3d-m5-backup-restore e2e-k3d-fusekiui-ingress run generate manifests docker-build-fuseki docker-build-rdf-delta docker-smoke-fuseki docker-smoke-rdf-delta tidy
 
 fmt:
 	$(GO) fmt ./...
@@ -35,6 +36,9 @@ e2e-k3d-m4-oidc:
 
 e2e-k3d-m4-tls:
 	bash ./hack/e2e/k3d-m4-tls.sh
+
+e2e-k3d-m5-backup-restore:
+	bash ./hack/e2e/k3d-m5-backup-restore.sh
 
 e2e-k3d-fusekiui-ingress:
 	bash ./hack/e2e/k3d-m4-fusekiui-ingress.sh
@@ -62,10 +66,15 @@ docker-build-fuseki:
 		-t $(FUSEKI_IMAGE) \
 		-f images/fuseki/Dockerfile .
 
-docker-build-rdf-delta-mock:
+
+docker-build-rdf-delta:
+	@test -n "$(JENA_VERSION)" || (echo "JENA_VERSION is required" >&2; exit 1)
+	@test -n "$(JENA_COMMANDS_SHA512)" || (echo "JENA_COMMANDS_SHA512 is required" >&2; exit 1)
 	$(CONTAINER_TOOL) build \
-		-t $(RDF_DELTA_MOCK_IMAGE) \
-		-f images/rdf-delta-mock/Dockerfile .
+		--build-arg JENA_VERSION=$(JENA_VERSION) \
+		--build-arg JENA_COMMANDS_SHA512=$(JENA_COMMANDS_SHA512) \
+		-t $(RDF_DELTA_IMAGE) \
+		-f images/rdf-delta/Dockerfile .
 
 docker-smoke-fuseki: docker-build-fuseki
 	container_id=$$($(CONTAINER_TOOL) run -d -p 13030:3030 $(FUSEKI_IMAGE)); \
@@ -80,3 +89,27 @@ docker-smoke-fuseki: docker-build-fuseki
 	$(CONTAINER_TOOL) logs $$container_id; \
 	echo "Fuseki image smoke test failed" >&2; \
 	exit 1
+
+docker-smoke-rdf-delta: docker-build-rdf-delta
+	set -eu; \
+	container_id=$$($(CONTAINER_TOOL) run -d -p 13066:1066 $(RDF_DELTA_IMAGE) rdf-delta-server --port 1066 --storage /var/lib/rdf-delta); \
+	trap '$(CONTAINER_TOOL) rm -f '$$container_id' >/dev/null 2>&1 || true' EXIT; \
+	for attempt in $$(seq 1 60); do \
+		if curl --silent --fail 'http://127.0.0.1:13066/$$/ping' >/dev/null; then \
+			break; \
+		fi; \
+		sleep 2; \
+		if [ $$attempt -eq 60 ]; then \
+			$(CONTAINER_TOOL) logs $$container_id; \
+			echo "RDF Delta image smoke test failed during startup" >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	curl --silent --show-error --fail -X POST -H 'Content-Type: application/sparql-update' --data 'INSERT DATA { <urn:smoke:s> <urn:smoke:p> "ok" }' 'http://127.0.0.1:13066/delta/update' >/dev/null; \
+	query_result=$$(curl --silent --show-error --fail --get --data-urlencode 'query=SELECT ?o WHERE { <urn:smoke:s> <urn:smoke:p> ?o }' -H 'Accept: text/csv' 'http://127.0.0.1:13066/delta/query'); \
+	printf '%s\n' "$$query_result" | grep -q 'ok' || { \
+		$(CONTAINER_TOOL) logs $$container_id; \
+		echo "RDF Delta image smoke test failed during query validation" >&2; \
+		exit 1; \
+	}; \
+	echo "RDF Delta image smoke test passed"

@@ -58,6 +58,7 @@ rules:
   - apiGroups:
       - batch
     resources:
+      - cronjobs
       - jobs
     verbs:
       - get
@@ -66,6 +67,7 @@ rules:
       - create
       - update
       - patch
+      - delete
   - apiGroups:
       - coordination.k8s.io
     resources:

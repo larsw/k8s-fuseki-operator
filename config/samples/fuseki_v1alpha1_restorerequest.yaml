@@ -1,0 +1,11 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: RestoreRequest
+metadata:
+  name: example-restore
+spec:
+  targetRef:
+    kind: RDFDeltaServer
+    name: example-delta
+  backupPolicyRef:
+    name: example-backuppolicy
+  backupObject: 20260308T120000Z-example-delta

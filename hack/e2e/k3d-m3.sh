@@ -7,7 +7,7 @@ CLUSTER_NAME="${CLUSTER_NAME:-fuseki-m3-e2e}"
 NAMESPACE="${NAMESPACE:-fuseki-e2e}"
 KUBECTL_CONTEXT="k3d-${CLUSTER_NAME}"
 FUSEKI_IMAGE="${FUSEKI_IMAGE:-ghcr.io/example/fuseki-operator/fuseki:e2e}"
-RDF_DELTA_MOCK_IMAGE="${RDF_DELTA_MOCK_IMAGE:-ghcr.io/example/fuseki-operator/rdf-delta-mock:e2e}"
+RDF_DELTA_IMAGE="${RDF_DELTA_IMAGE:-ghcr.io/example/fuseki-operator/rdf-delta:e2e}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-e2e-admin-password}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 TMP_DIR="$(mktemp -d)"
@@ -15,6 +15,7 @@ MANAGER_LOG="${TMP_DIR}/manager.log"
 PORT_FORWARD_LOG="${TMP_DIR}/port-forward.log"
 METRICS_BIND_ADDRESS="${METRICS_BIND_ADDRESS:-127.0.0.1:0}"
 PROBE_BIND_ADDRESS="${PROBE_BIND_ADDRESS:-127.0.0.1:0}"
+WRITE_PORT_FORWARD_PORT="${WRITE_PORT_FORWARD_PORT:-}"
 
 print_section() {
 	local title=$1
@@ -106,6 +107,24 @@ wait_for_http() {
 	return 1
 }
 
+select_local_port() {
+	local port
+	if [[ -n "${WRITE_PORT_FORWARD_PORT}" ]]; then
+		echo "${WRITE_PORT_FORWARD_PORT}"
+		return 0
+	fi
+
+	for port in $(seq 13030 13130); do
+		if ! (echo >"/dev/tcp/127.0.0.1/${port}") >/dev/null 2>&1; then
+			echo "${port}"
+			return 0
+		fi
+	done
+
+	echo "unable to find a free local port for the write pod port-forward" >&2
+	return 1
+}
+
 wait_for_manager() {
 	for _ in $(seq 1 30); do
 		if grep -q 'starting manager' "${MANAGER_LOG}" 2>/dev/null; then
@@ -127,11 +146,11 @@ cd "${ROOT_DIR}"
 
 make generate manifests
 make docker-build-fuseki FUSEKI_IMAGE="${FUSEKI_IMAGE}"
-make docker-build-rdf-delta-mock RDF_DELTA_MOCK_IMAGE="${RDF_DELTA_MOCK_IMAGE}"
+make docker-build-rdf-delta RDF_DELTA_IMAGE="${RDF_DELTA_IMAGE}"
 
 k3d cluster delete "${CLUSTER_NAME}" >/dev/null 2>&1 || true
 k3d cluster create "${CLUSTER_NAME}" --wait
-k3d image import -c "${CLUSTER_NAME}" "${FUSEKI_IMAGE}" "${RDF_DELTA_MOCK_IMAGE}"
+k3d image import -c "${CLUSTER_NAME}" "${FUSEKI_IMAGE}" "${RDF_DELTA_IMAGE}"
 
 kubectl config use-context "${KUBECTL_CONTEXT}" >/dev/null
 kubectl apply -f config/crd/bases
@@ -171,7 +190,7 @@ metadata:
   name: example-delta
   namespace: ${NAMESPACE}
 spec:
-  image: ${RDF_DELTA_MOCK_IMAGE}
+  image: ${RDF_DELTA_IMAGE}
   replicas: 1
   servicePort: 1066
   storage:
@@ -234,17 +253,19 @@ if [[ "$(wc -w <<<"${read_endpoints}")" -lt 2 ]]; then
 	exit 1
 fi
 
-kubectl port-forward -n "${NAMESPACE}" service/example-write 13030:3030 >"${PORT_FORWARD_LOG}" 2>&1 &
+write_local_port="$(select_local_port)"
+
+kubectl port-forward -n "${NAMESPACE}" "pod/${lease_holder}" "${write_local_port}:3030" >"${PORT_FORWARD_LOG}" 2>&1 &
 PORT_FORWARD_PID=$!
-wait_for_http 'http://127.0.0.1:13030/$/ping'
+wait_for_http "http://127.0.0.1:${write_local_port}/$/ping"
 
 curl --silent --show-error --fail \
 	-u "admin:${ADMIN_PASSWORD}" \
 	-H 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8' \
 	--data 'dbName=probe&dbType=tdb2' \
-	'http://127.0.0.1:13030/$/datasets' >/dev/null
+	"http://127.0.0.1:${write_local_port}/$/datasets" >/dev/null
 
-datasets_json="$(curl --silent --show-error --fail -u "admin:${ADMIN_PASSWORD}" -H 'Accept: application/json' 'http://127.0.0.1:13030/$/datasets')"
+datasets_json="$(curl --silent --show-error --fail -u "admin:${ADMIN_PASSWORD}" -H 'Accept: application/json' "http://127.0.0.1:${write_local_port}/$/datasets")"
 
 if ! grep -q 'primary' <<<"${datasets_json}"; then
 	echo "expected bootstrapped dataset primary in Fuseki datasets response" >&2

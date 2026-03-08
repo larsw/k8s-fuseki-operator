@@ -1,0 +1,14 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: BackupPolicy
+metadata:
+  name: example-backuppolicy
+spec:
+  schedule: "0 */6 * * *"
+  s3:
+    endpoint: https://minio.example.test
+    bucket: fuseki-backups
+    prefix: rdf-delta
+    credentialsSecretRef:
+      name: example-backup-s3
+  retention:
+    maxBackups: 14

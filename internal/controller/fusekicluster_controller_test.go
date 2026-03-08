@@ -63,8 +63,9 @@ func TestFusekiClusterReconcileCreatesBaseResources(t *testing.T) {
 			Name:      "example-0",
 			Namespace: "default",
 			Labels: map[string]string{
-				"app.kubernetes.io/name":    "fuseki",
-				"fuseki.apache.org/cluster": "example",
+				"app.kubernetes.io/name":      "fuseki",
+				"fuseki.apache.org/cluster":   "example",
+				"fuseki.apache.org/component": "server",
 			},
 		},
 		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
@@ -265,8 +266,16 @@ func TestFusekiClusterReconcileDefersBootstrapUntilSecurityReady(t *testing.T) {
 		},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "example-0", Namespace: "default", Labels: map[string]string{"app.kubernetes.io/name": "fuseki", "fuseki.apache.org/cluster": "example"}},
-		Status:     corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "example-0",
+			Namespace: "default",
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "fuseki",
+				"fuseki.apache.org/cluster":   "example",
+				"fuseki.apache.org/component": "server",
+			},
+		},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
 	}
 
 	k8sClient := fake.NewClientBuilder().
@@ -341,8 +350,9 @@ func TestFusekiClusterReconcileCreatesObservabilityResources(t *testing.T) {
 			Name:      "example-0",
 			Namespace: "default",
 			Labels: map[string]string{
-				"app.kubernetes.io/name":    "fuseki",
-				"fuseki.apache.org/cluster": "example",
+				"app.kubernetes.io/name":      "fuseki",
+				"fuseki.apache.org/cluster":   "example",
+				"fuseki.apache.org/component": "server",
 			},
 		},
 		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
@@ -408,5 +418,90 @@ func TestFusekiClusterReconcileCreatesObservabilityResources(t *testing.T) {
 	condition := apimeta.FindStatusCondition(updated.Status.Conditions, monitoringReadyConditionType)
 	if condition == nil || condition.Status != metav1.ConditionTrue {
 		t.Fatalf("expected monitoring condition true, got %#v", condition)
+	}
+}
+
+func TestFusekiClusterReconcileIgnoresBootstrapPodsForLeaseSelection(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+
+	cluster := &fusekiv1alpha1.FusekiCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "example", Namespace: "default"},
+		Spec: fusekiv1alpha1.FusekiClusterSpec{
+			Image:             "ghcr.io/example/fuseki:6.0.0",
+			RDFDeltaServerRef: corev1.LocalObjectReference{Name: "delta"},
+		},
+	}
+	serverPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "example-0",
+			Namespace: "default",
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "fuseki",
+				"fuseki.apache.org/cluster":   "example",
+				"fuseki.apache.org/component": "server",
+			},
+		},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	bootstrapPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cluster-example-example-dataset-bootstrap-abcde",
+			Namespace: "default",
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "fuseki",
+				"fuseki.apache.org/cluster":   "example",
+				"fuseki.apache.org/component": "dataset-bootstrap",
+			},
+		},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.FusekiCluster{}).
+		WithObjects(cluster, serverPod, bootstrapPod).
+		Build()
+
+	reconciler := &FusekiClusterReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cluster)}); err != nil {
+		t.Fatalf("reconcile cluster: %v", err)
+	}
+
+	lease := &coordinationv1.Lease{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "example-write"}, lease); err != nil {
+		t.Fatalf("get write lease: %v", err)
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != "example-0" {
+		t.Fatalf("unexpected lease holder: %v", lease.Spec.HolderIdentity)
+	}
+
+	updatedBootstrapPod := &corev1.Pod{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(bootstrapPod), updatedBootstrapPod); err != nil {
+		t.Fatalf("get bootstrap pod: %v", err)
+	}
+	if _, ok := updatedBootstrapPod.Labels["fuseki.apache.org/read-route"]; ok {
+		t.Fatalf("expected bootstrap pod to be excluded from read routing")
+	}
+	if _, ok := updatedBootstrapPod.Labels["fuseki.apache.org/write-route"]; ok {
+		t.Fatalf("expected bootstrap pod to be excluded from write routing")
+	}
+	if _, ok := updatedBootstrapPod.Labels["fuseki.apache.org/lease-holder"]; ok {
+		t.Fatalf("expected bootstrap pod to be excluded from lease-holder routing")
+	}
+
+	updatedServerPod := &corev1.Pod{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(serverPod), updatedServerPod); err != nil {
+		t.Fatalf("get server pod: %v", err)
+	}
+	if got := updatedServerPod.Labels["fuseki.apache.org/write-route"]; got != "true" {
+		t.Fatalf("unexpected server write-route label: %q", got)
 	}
 }

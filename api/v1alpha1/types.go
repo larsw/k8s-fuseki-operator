@@ -192,6 +192,8 @@ type RDFDeltaServerStatus struct {
 	ServiceName         string             `json:"serviceName,omitempty"`
 	HeadlessServiceName string             `json:"headlessServiceName,omitempty"`
 	StatefulSetName     string             `json:"statefulSetName,omitempty"`
+	BackupCronJobName   string             `json:"backupCronJobName,omitempty"`
+	ActiveRestoreName   string             `json:"activeRestoreName,omitempty"`
 	ReadyReplicas       int32              `json:"readyReplicas,omitempty"`
 	Conditions          []metav1.Condition `json:"conditions,omitempty"`
 }
@@ -426,10 +428,60 @@ type SecurityProfileList struct {
 	Items           []SecurityProfile `json:"items"`
 }
 
-type BackupPolicySpec struct{}
+type BackupPolicySpec struct {
+	// +kubebuilder:validation:MinLength=1
+	Schedule string `json:"schedule"`
+
+	Suspend bool `json:"suspend,omitempty"`
+
+	S3 BackupPolicyS3Spec `json:"s3"`
+
+	Retention BackupPolicyRetentionSpec `json:"retention,omitempty"`
+	Job       BackupPolicyJobSpec       `json:"job,omitempty"`
+}
+
+type BackupPolicyS3Spec struct {
+	// +kubebuilder:validation:Pattern=`^https?://.+`
+	Endpoint string `json:"endpoint"`
+
+	// +kubebuilder:validation:MinLength=1
+	Bucket string `json:"bucket"`
+
+	Prefix string `json:"prefix,omitempty"`
+	Region string `json:"region,omitempty"`
+
+	CredentialsSecretRef corev1.LocalObjectReference `json:"credentialsSecretRef"`
+
+	Insecure bool `json:"insecure,omitempty"`
+}
+
+type BackupPolicyRetentionSpec struct {
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=7
+	MaxBackups int32 `json:"maxBackups,omitempty"`
+}
+
+type BackupPolicyJobSpec struct {
+	Image string `json:"image,omitempty"`
+
+	// +kubebuilder:default=IfNotPresent
+	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
+
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=3
+	SuccessfulJobsHistoryLimit *int32 `json:"successfulJobsHistoryLimit,omitempty"`
+
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=1
+	FailedJobsHistoryLimit *int32 `json:"failedJobsHistoryLimit,omitempty"`
+}
 
 type BackupPolicyStatus struct {
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	Phase              string             `json:"phase,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -447,6 +499,54 @@ type BackupPolicyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []BackupPolicy `json:"items"`
+}
+
+// +kubebuilder:validation:Enum=RDFDeltaServer
+type RestoreRequestTargetKind string
+
+const (
+	RestoreRequestTargetKindRDFDeltaServer RestoreRequestTargetKind = "RDFDeltaServer"
+)
+
+type RestoreRequestTargetRef struct {
+	Kind RestoreRequestTargetKind `json:"kind"`
+
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
+
+type RestoreRequestSpec struct {
+	TargetRef RestoreRequestTargetRef `json:"targetRef"`
+
+	BackupPolicyRef *corev1.LocalObjectReference `json:"backupPolicyRef,omitempty"`
+
+	BackupObject string `json:"backupObject,omitempty"`
+}
+
+type RestoreRequestStatus struct {
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	Phase              string             `json:"phase,omitempty"`
+	TargetName         string             `json:"targetName,omitempty"`
+	JobName            string             `json:"jobName,omitempty"`
+	ResolvedBackupRef  string             `json:"resolvedBackupRef,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+type RestoreRequest struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   RestoreRequestSpec   `json:"spec,omitempty"`
+	Status RestoreRequestStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type RestoreRequestList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []RestoreRequest `json:"items"`
 }
 
 type FusekiServerSpec struct {
@@ -525,6 +625,8 @@ func init() {
 		&SecurityProfileList{},
 		&BackupPolicy{},
 		&BackupPolicyList{},
+		&RestoreRequest{},
+		&RestoreRequestList{},
 	)
 }
 
@@ -722,6 +824,18 @@ func (in *RDFDeltaServer) HeadlessServiceName() string {
 
 func (in *RDFDeltaServer) StatefulSetName() string {
 	return in.Name
+}
+
+func (in *RDFDeltaServer) BackupCronJobName() string {
+	return in.Name + "-backup"
+}
+
+func (in *RDFDeltaServer) RestoreStatefulSetReplicas(activeRestore bool) int32 {
+	if activeRestore {
+		return 0
+	}
+
+	return in.DesiredReplicas()
 }
 
 func (in *Dataset) ConfigMapName() string {
@@ -922,4 +1036,56 @@ func (in *FusekiServer) PersistentVolumeClaimName() string {
 
 func (in *SecurityProfile) ConfigMapName() string {
 	return in.Name + "-security"
+}
+
+func (in *BackupPolicy) DesiredBackupImage() string {
+	if in.Spec.Job.Image != "" {
+		return in.Spec.Job.Image
+	}
+
+	return "minio/mc:RELEASE.2025-07-21T05-28-08Z"
+}
+
+func (in *BackupPolicy) DesiredImagePullPolicy() corev1.PullPolicy {
+	if in.Spec.Job.ImagePullPolicy != "" {
+		return in.Spec.Job.ImagePullPolicy
+	}
+
+	return corev1.PullIfNotPresent
+}
+
+func (in *BackupPolicy) DesiredSuccessfulJobsHistoryLimit() int32 {
+	if in.Spec.Job.SuccessfulJobsHistoryLimit != nil {
+		return *in.Spec.Job.SuccessfulJobsHistoryLimit
+	}
+
+	return 3
+}
+
+func (in *BackupPolicy) DesiredFailedJobsHistoryLimit() int32 {
+	if in.Spec.Job.FailedJobsHistoryLimit != nil {
+		return *in.Spec.Job.FailedJobsHistoryLimit
+	}
+
+	return 1
+}
+
+func (in *BackupPolicy) DesiredMaxBackups() int32 {
+	if in.Spec.Retention.MaxBackups > 0 {
+		return in.Spec.Retention.MaxBackups
+	}
+
+	return 7
+}
+
+func (in *RestoreRequest) JobName() string {
+	return in.Name + "-restore"
+}
+
+func (in *RestoreRequest) DesiredResolvedBackupRef() string {
+	if in.Spec.BackupObject != "" {
+		return in.Spec.BackupObject
+	}
+
+	return "latest"
 }

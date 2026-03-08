@@ -398,6 +398,9 @@ func (r *FusekiClusterReconciler) reconcilePodRouting(ctx context.Context, clust
 
 	for index := range pods.Items {
 		pod := &pods.Items[index]
+		if !isFusekiClusterServerPod(pod) {
+			continue
+		}
 		updated := pod.DeepCopy()
 		if updated.Labels == nil {
 			updated.Labels = map[string]string{}
@@ -430,11 +433,20 @@ func (r *FusekiClusterReconciler) listClusterPods(ctx context.Context, cluster *
 		return nil, err
 	}
 
-	sort.Slice(podList.Items, func(i, j int) bool {
-		return podList.Items[i].Name < podList.Items[j].Name
+	filtered := make([]corev1.Pod, 0, len(podList.Items))
+	for i := range podList.Items {
+		pod := podList.Items[i]
+		if !isFusekiClusterServerPod(&pod) {
+			continue
+		}
+		filtered = append(filtered, pod)
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Name < filtered[j].Name
 	})
 
-	return podList.Items, nil
+	return filtered, nil
 }
 
 func clusterLabels(cluster *fusekiv1alpha1.FusekiCluster) map[string]string {
@@ -585,6 +597,17 @@ func podIsReady(pod *corev1.Pod) bool {
 	}
 
 	return false
+}
+
+func isFusekiClusterServerPod(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	if pod.Labels["app.kubernetes.io/name"] != "fuseki" {
+		return false
+	}
+	component, hasComponent := pod.Labels["fuseki.apache.org/component"]
+	return !hasComponent || component == "server"
 }
 
 func joinLocalObjectReferences(refs []corev1.LocalObjectReference) string {

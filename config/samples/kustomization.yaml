@@ -1,4 +1,6 @@
 resources:
+  - fuseki_v1alpha1_backuppolicy.yaml
+  - fuseki_v1alpha1_restorerequest.yaml
   - fuseki_v1alpha1_fusekicluster.yaml
   - fuseki_v1alpha1_fusekiserver.yaml
   - fuseki_v1alpha1_rdfdeltaserver.yaml

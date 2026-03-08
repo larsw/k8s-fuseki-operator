@@ -104,6 +104,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&fusekicontroller.BackupPolicyReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create controller", "controller", "BackupPolicy")
+		os.Exit(1)
+	}
+
+	if err := (&fusekicontroller.RestoreRequestReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create controller", "controller", "RestoreRequest")
+		os.Exit(1)
+	}
+
 	if err := (&fusekicontroller.EndpointReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),

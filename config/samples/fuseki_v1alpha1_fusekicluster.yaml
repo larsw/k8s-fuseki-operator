@@ -12,7 +12,7 @@ spec:
     - name: example-dataset
   storage:
     accessMode: ReadWriteOnce
-    size: 20Gi
+    size: 2Gi
   observability:
     metrics:
       service:
