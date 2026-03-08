@@ -11,13 +11,25 @@ import (
 
 func TestResolveControllerInstallImageDefaultsToCLIKeyedTag(t *testing.T) {
 	originalVersion := version.Version
-	version.Version = "v0.1.0"
+	version.Version = "0.1.0"
 	defer func() {
 		version.Version = originalVersion
 	}()
 
 	if got := resolveControllerInstallImage("", ""); got != officialControllerImage+":v0.1.0" {
 		t.Fatalf("unexpected default controller image: %q", got)
+	}
+}
+
+func TestResolveControllerInstallImageKeepsNonReleaseDefaultTag(t *testing.T) {
+	originalVersion := version.Version
+	version.Version = "dev"
+	defer func() {
+		version.Version = originalVersion
+	}()
+
+	if got := resolveControllerInstallImage("", ""); got != officialControllerImage+":dev" {
+		t.Fatalf("unexpected default controller image for dev build: %q", got)
 	}
 }
 

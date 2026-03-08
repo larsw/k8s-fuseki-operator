@@ -189,9 +189,19 @@ func resolveControllerInstallImage(imageOverride, tagOverride string) string {
 		return imageOverride
 	}
 	if tagOverride == "" {
-		tagOverride = version.Version
+		tagOverride = normalizeDefaultInstallTag(version.Version)
 	}
 	return officialControllerImage + ":" + tagOverride
+}
+
+func normalizeDefaultInstallTag(tag string) string {
+	if tag == "" || strings.HasPrefix(tag, "v") {
+		return tag
+	}
+	if tag[0] >= '0' && tag[0] <= '9' {
+		return "v" + tag
+	}
+	return tag
 }
 
 type kustomizeImageOverride struct {

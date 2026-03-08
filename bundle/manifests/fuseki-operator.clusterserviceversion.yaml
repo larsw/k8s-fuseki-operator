@@ -1,7 +1,7 @@
 apiVersion: operators.coreos.com/v1alpha1
 kind: ClusterServiceVersion
 metadata:
-  name: fuseki-operator.v0.1.1
+  name: fuseki-operator.v0.1.2
   annotations:
     alm-examples: |
       [
@@ -181,7 +181,7 @@ metadata:
       ]
     capabilities: Basic Install
     categories: Database
-    containerImage: ghcr.io/larsw/k8s-fuseki-operator/controller:v0.1.1
+    containerImage: ghcr.io/larsw/k8s-fuseki-operator/controller:v0.1.2
     createdAt: "2026-03-08T00:00:00Z"
     description: Operator for Apache Jena Fuseki clusters, RDF Delta replication, security, and backup or restore workflows.
     operators.operatorframework.io/builder: manual
@@ -193,7 +193,7 @@ spec:
 
     The operator reconciles Fuseki clusters, RDF Delta servers, datasets, security profiles,
     ingress endpoints, UI resources, and backup or restore workflows.
-  version: 0.1.1
+  version: 0.1.2
   maturity: alpha
   minKubeVersion: 1.33.0
   provider:
@@ -261,11 +261,11 @@ spec:
         description: Configures admin credentials, TLS, and identity-provider integration.
   relatedImages:
     - name: controller
-      image: ghcr.io/larsw/k8s-fuseki-operator/controller:v0.1.1
+      image: ghcr.io/larsw/k8s-fuseki-operator/controller:v0.1.2
     - name: fuseki
-      image: ghcr.io/larsw/k8s-fuseki-operator/fuseki:v0.1.1
+      image: ghcr.io/larsw/k8s-fuseki-operator/fuseki:v0.1.2
     - name: rdf-delta
-      image: ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:v0.1.1
+      image: ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:v0.1.2
   install:
     strategy: deployment
     spec:
@@ -371,7 +371,7 @@ spec:
                 serviceAccountName: fuseki-operator-controller-manager
                 containers:
                   - name: manager
-                    image: ghcr.io/larsw/k8s-fuseki-operator/controller:v0.1.1
+                    image: ghcr.io/larsw/k8s-fuseki-operator/controller:v0.1.2
                     imagePullPolicy: IfNotPresent
                     command:
                       - /manager

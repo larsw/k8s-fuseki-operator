@@ -68,7 +68,7 @@ Override the controller image tag or pin scheduling-related values with a small 
 ```sh
 helm upgrade --install fuseki-operator ./charts/fuseki-operator \
 	-n fuseki-system --create-namespace \
-	--set image.tag=v0.1.1 \
+	--set image.tag=v0.1.2 \
 	--set nodeSelector."kubernetes\.io/os"=linux
 ```
 
