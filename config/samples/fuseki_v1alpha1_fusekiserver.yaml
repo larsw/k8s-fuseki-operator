@@ -4,7 +4,7 @@ metadata:
   name: example-fusekiserver
   namespace: default
 spec:
-  image: ghcr.io/example/fuseki:6.0.0
+  image: ghcr.io/larsw/k8s-fuseki-operator/fuseki:v0.1.1
   datasetRefs:
     - name: example-dataset
   observability:

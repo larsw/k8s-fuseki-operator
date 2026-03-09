@@ -2,6 +2,7 @@ apiVersion: fuseki.apache.org/v1alpha1
 kind: Dataset
 metadata:
   name: example-dataset
+  namespace: default
 spec:
   name: primary
   type: TDB2
