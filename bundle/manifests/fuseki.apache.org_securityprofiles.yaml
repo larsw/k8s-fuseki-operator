@@ -53,8 +53,60 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
-              oidcIssuerURL:
-                type: string
+              authorization:
+                properties:
+                  mode:
+                    default: Local
+                    enum:
+                    - Local
+                    - Ranger
+                    type: string
+                  ranger:
+                    properties:
+                      adminURL:
+                        pattern: ^https?://.+
+                        type: string
+                      authSecretRef:
+                        description: |-
+                          LocalObjectReference contains enough information to let you locate the
+                          referenced object inside the same namespace.
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      pollInterval:
+                        default: 30s
+                        type: string
+                      serviceName:
+                        minLength: 1
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: authSecretRef is required for Ranger authorization
+                      rule: has(self.authSecretRef) && self.authSecretRef.name !=
+                        ''
+                type: object
+                x-kubernetes-validations:
+                - message: ranger settings are required when authorization mode is
+                    Ranger
+                  rule: self.mode != 'Ranger' || has(self.ranger)
+                - message: ranger settings are only supported in Ranger mode
+                  rule: self.mode != 'Local' || !has(self.ranger)
+              oidc:
+                properties:
+                  clientID:
+                    type: string
+                  issuerURL:
+                    type: string
+                type: object
               tlsSecretRef:
                 description: |-
                   LocalObjectReference contains enough information to let you locate the
@@ -74,6 +126,11 @@ spec:
             type: object
           status:
             properties:
+              authorizationMode:
+                enum:
+                - Local
+                - Ranger
+                type: string
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current

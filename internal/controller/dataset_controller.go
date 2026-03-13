@@ -14,6 +14,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fusekiv1alpha1 "github.com/larsw/k8s-fuseki-operator/api/v1alpha1"
 )
@@ -25,6 +27,7 @@ type DatasetReconciler struct {
 
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=datasets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=datasets/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=fuseki.apache.org,resources=securitypolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 
 func (r *DatasetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -33,7 +36,8 @@ func (r *DatasetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if err := r.reconcileConfigMap(ctx, &dataset); err != nil {
+	missingPolicyRefs, err := r.reconcileConfigMap(ctx, &dataset)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -41,13 +45,20 @@ func (r *DatasetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	updated.Status.ObservedGeneration = dataset.Generation
 	updated.Status.ConfigMapName = dataset.ConfigMapName()
 	updated.Status.Phase = "Defined"
-	apimeta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{
+	condition := metav1.Condition{
 		Type:               configuredConditionType,
 		Status:             metav1.ConditionTrue,
 		Reason:             "ConfigRendered",
 		Message:            "Dataset config is reconciled.",
 		ObservedGeneration: dataset.Generation,
-	})
+	}
+	if len(missingPolicyRefs) > 0 {
+		updated.Status.Phase = "Pending"
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = "SecurityPoliciesMissing"
+		condition.Message = "Waiting for referenced SecurityPolicies: " + strings.Join(missingPolicyRefs, ", ")
+	}
+	apimeta.SetStatusCondition(&updated.Status.Conditions, condition)
 
 	if !reflect.DeepEqual(dataset.Status, updated.Status) {
 		dataset.Status = updated.Status
@@ -62,17 +73,34 @@ func (r *DatasetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 func (r *DatasetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&fusekiv1alpha1.Dataset{}).
+		Watches(&fusekiv1alpha1.SecurityPolicy{}, handler.EnqueueRequestsFromMapFunc(r.requestsForSecurityPolicy)).
 		Owns(&corev1.ConfigMap{}).
 		Complete(r)
 }
 
-func (r *DatasetReconciler) reconcileConfigMap(ctx context.Context, dataset *fusekiv1alpha1.Dataset) error {
+func (r *DatasetReconciler) reconcileConfigMap(ctx context.Context, dataset *fusekiv1alpha1.Dataset) ([]string, error) {
+	policies, missingPolicyRefs, err := resolveDatasetSecurityPolicies(ctx, r.Client, dataset)
+	if err != nil {
+		return nil, err
+	}
+
 	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: dataset.ConfigMapName(), Namespace: dataset.Namespace}}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, configMap, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, configMap, func() error {
 		configMap.Labels = mergeStringMaps(datasetLabels(dataset), map[string]string{"fuseki.apache.org/component": "dataset-config"})
 		configMap.Data = map[string]string{
 			"dataset.properties": renderDatasetProperties(dataset),
 			"preload.txt":        strings.Join(preloadEntries(dataset.Spec.Preload), "\n"),
+		}
+		if len(missingPolicyRefs) == 0 {
+			delete(configMap.Data, "security-policies.missing")
+			bundle, err := renderDatasetSecurityPolicyBundle(policies)
+			if err != nil {
+				return err
+			}
+			configMap.Data["security-policies.json"] = bundle
+		} else {
+			delete(configMap.Data, "security-policies.json")
+			configMap.Data["security-policies.missing"] = strings.Join(missingPolicyRefs, "\n") + "\n"
 		}
 		if dataset.Spec.Spatial != nil && dataset.Spec.Spatial.Enabled {
 			configMap.Data["spatial.properties"] = renderSpatialProperties(dataset)
@@ -80,7 +108,24 @@ func (r *DatasetReconciler) reconcileConfigMap(ctx context.Context, dataset *fus
 
 		return controllerutil.SetControllerReference(dataset, configMap, r.Scheme)
 	})
-	return err
+	return missingPolicyRefs, err
+}
+
+func (r *DatasetReconciler) requestsForSecurityPolicy(ctx context.Context, obj client.Object) []reconcile.Request {
+	var datasets fusekiv1alpha1.DatasetList
+	if err := r.List(ctx, &datasets, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0)
+	for i := range datasets.Items {
+		dataset := &datasets.Items[i]
+		if !datasetReferencesSecurityPolicy(dataset, obj.GetName()) {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(dataset)})
+	}
+	return requests
 }
 
 func datasetLabels(dataset *fusekiv1alpha1.Dataset) map[string]string {

@@ -47,7 +47,10 @@ func TestEnvtestFusekiServerDatasetBootstrap(t *testing.T) {
 		Spec: fusekiv1alpha1.SecurityProfileSpec{
 			AdminCredentialsSecretRef: &corev1.LocalObjectReference{Name: "admin-secret"},
 			TLSSecretRef:              &corev1.LocalObjectReference{Name: "tls-secret"},
-			OIDCIssuerURL:             "https://issuer.example.com",
+			OIDC: &fusekiv1alpha1.SecurityOIDCSpec{
+				IssuerURL: "https://issuer.example.com",
+				ClientID:  "fuseki-ui",
+			},
 		},
 	}
 	secret := &corev1.Secret{
@@ -104,6 +107,9 @@ func TestEnvtestFusekiServerDatasetBootstrap(t *testing.T) {
 	if got := envVarValue(container.Env, "SECURITY_PROFILE_OIDC_ISSUER"); got != "https://issuer.example.com" {
 		t.Fatalf("unexpected bootstrap OIDC issuer: %q", got)
 	}
+	if got := envVarValue(container.Env, "SECURITY_PROFILE_OIDC_CLIENT_ID"); got != "fuseki-ui" {
+		t.Fatalf("unexpected bootstrap OIDC client ID: %q", got)
+	}
 
 	service := &corev1.Service{}
 	if err := client.Get(ctx, objectKey(namespace.Name, server.ServiceName()), service); err != nil {
@@ -119,6 +125,9 @@ func TestEnvtestFusekiServerDatasetBootstrap(t *testing.T) {
 	}
 	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "SECURITY_PROFILE_OIDC_ISSUER"); got != "https://issuer.example.com" {
 		t.Fatalf("unexpected runtime OIDC issuer: %q", got)
+	}
+	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "SECURITY_PROFILE_OIDC_CLIENT_ID"); got != "fuseki-ui" {
+		t.Fatalf("unexpected runtime OIDC client ID: %q", got)
 	}
 	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "FUSEKI_SERVER_SCHEME"); got != "https" {
 		t.Fatalf("unexpected runtime server scheme: %q", got)
@@ -149,7 +158,7 @@ func TestEnvtestFusekiServerDatasetBootstrap(t *testing.T) {
 	if err := client.Get(ctx, objectKey(namespace.Name, profile.ConfigMapName()), securityConfig); err != nil {
 		t.Fatalf("get security configmap: %v", err)
 	}
-	if !containsLine(securityConfig.Data["security.properties"], "oidc.issuerURL=https://issuer.example.com") || !containsLine(securityConfig.Data["security.properties"], "tls.certFile=/fuseki-extra/security/tls/tls.crt") {
+	if !containsLine(securityConfig.Data["security.properties"], "oidc.issuerURL=https://issuer.example.com") || !containsLine(securityConfig.Data["security.properties"], "oidc.clientID=fuseki-ui") || !containsLine(securityConfig.Data["security.properties"], "tls.certFile=/fuseki-extra/security/tls/tls.crt") {
 		t.Fatalf("unexpected security properties: %q", securityConfig.Data["security.properties"])
 	}
 }
@@ -178,7 +187,10 @@ func TestEnvtestFusekiServerReconcilePreservesExistingBootstrapJobTemplate(t *te
 		Spec: fusekiv1alpha1.SecurityProfileSpec{
 			AdminCredentialsSecretRef: &corev1.LocalObjectReference{Name: "admin-secret"},
 			TLSSecretRef:              &corev1.LocalObjectReference{Name: "tls-secret"},
-			OIDCIssuerURL:             "https://issuer.example.com",
+			OIDC: &fusekiv1alpha1.SecurityOIDCSpec{
+				IssuerURL: "https://issuer.example.com",
+				ClientID:  "fuseki-ui",
+			},
 		},
 	}
 	secret := &corev1.Secret{

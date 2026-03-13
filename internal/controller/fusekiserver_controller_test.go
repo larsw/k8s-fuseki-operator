@@ -51,7 +51,10 @@ func TestFusekiServerReconcileCreatesBaseResources(t *testing.T) {
 		Spec: fusekiv1alpha1.SecurityProfileSpec{
 			AdminCredentialsSecretRef: &corev1.LocalObjectReference{Name: "admin-secret"},
 			TLSSecretRef:              &corev1.LocalObjectReference{Name: "tls-secret"},
-			OIDCIssuerURL:             "https://dex.example.com/dex",
+			OIDC: &fusekiv1alpha1.SecurityOIDCSpec{
+				IssuerURL: "https://dex.example.com/dex",
+				ClientID:  "fuseki-ui",
+			},
 		},
 	}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "admin-secret", Namespace: "default"}}
@@ -87,7 +90,10 @@ func TestFusekiServerReconcileCreatesBaseResources(t *testing.T) {
 	if got := configMap.Data["mode"]; got != "single-server" {
 		t.Fatalf("unexpected mode: %q", got)
 	}
-	if got := configMap.Data["run-fuseki.sh"]; !containsLine(got, "  exec \"${JAVA_HOME}/bin/java\" -cp /opt/fuseki/fuseki-server.jar:/opt/fuseki/fuseki-operator-launcher.jar FusekiHttpsLauncher --https=\"${https_config}\" --httpsPort ${FUSEKI_PORT:-3030}") {
+	if got := configMap.Data["run-fuseki.sh"]; !containsLine(got, "launcher_classpath=\"/opt/fuseki/fuseki-server.jar:/opt/fuseki/fuseki-operator-launcher.jar:/opt/fuseki/fuseki-operator-deps/*\"") {
+		t.Fatalf("unexpected launcher classpath in startup script: %q", got)
+	}
+	if got := configMap.Data["run-fuseki.sh"]; !containsLine(got, "  exec \"${JAVA_HOME}/bin/java\" -cp \"${launcher_classpath}\" FusekiHttpsLauncher --config=/fuseki-extra/operator-config/fuseki-server.ttl --https=\"${https_config}\" --httpsPort ${FUSEKI_PORT:-3030}") {
 		t.Fatalf("unexpected TLS startup script: %q", got)
 	}
 	if got := configMap.Data["run-fuseki.sh"]; !containsLine(got, "  rm -f \"${FUSEKI_BASE}/shiro.ini\"") {
@@ -117,8 +123,17 @@ func TestFusekiServerReconcileCreatesBaseResources(t *testing.T) {
 	if got := deployment.Spec.Template.Spec.Containers[0].Args[1]; got != "/fuseki-extra/operator-config/run-fuseki.sh" {
 		t.Fatalf("unexpected container startup script: %q", got)
 	}
-	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "FUSEKI_DATASET_CONFIG_DIR"); got != "" {
-		t.Fatalf("expected no legacy dataset config dir env var, got %q", got)
+	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "FUSEKI_DATASET_CONFIG_DIR"); got != datasetConfigMountPath {
+		t.Fatalf("unexpected dataset config dir env var: %q", got)
+	}
+	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "FUSEKI_AUTHORIZATION_DIR"); got != authorizationConfigDir {
+		t.Fatalf("unexpected authorization dir env var: %q", got)
+	}
+	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "FUSEKI_AUTHORIZATION_INDEX"); got != authorizationIndexFile {
+		t.Fatalf("unexpected authorization index env var: %q", got)
+	}
+	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "FUSEKI_AUTHORIZATION_FAIL_CLOSED"); got != "true" {
+		t.Fatalf("unexpected authorization fail-closed env var: %q", got)
 	}
 	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "SECURITY_PROFILE_OIDC_ISSUER"); got != "https://dex.example.com/dex" {
 		t.Fatalf("unexpected OIDC issuer env var: %q", got)
@@ -146,6 +161,13 @@ func TestFusekiServerReconcileCreatesBaseResources(t *testing.T) {
 	}
 	if configMapName := configMapVolumeName(deployment.Spec.Template.Spec.Volumes, securityConfigVolumeName); configMapName != "admin-auth-security" {
 		t.Fatalf("unexpected security config volume source: %q", configMapName)
+	}
+	projectedPaths := projectedConfigMapPaths(deployment.Spec.Template.Spec.Volumes, datasetConfigVolumeName)
+	if got := projectedPaths["dataset.properties"]; got != "dataset-a/dataset.properties" {
+		t.Fatalf("unexpected projected dataset.properties path: %q", got)
+	}
+	if got := projectedPaths["security-policies.json"]; got != "dataset-a/security-policies.json" {
+		t.Fatalf("unexpected projected security-policies.json path: %q", got)
 	}
 	if secretName := secretVolumeName(deployment.Spec.Template.Spec.Volumes, securityTLSVolumeName); secretName != "tls-secret" {
 		t.Fatalf("unexpected security TLS volume source: %q", secretName)
@@ -236,6 +258,14 @@ func TestFusekiServerReconcileDefersBootstrapUntilSecurityReady(t *testing.T) {
 		t.Fatalf("expected bootstrap job to be deferred until security is ready")
 	}
 
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "standalone"}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 0 {
+		t.Fatalf("expected deployment replicas to fail closed at 0, got %#v", deployment.Spec.Replicas)
+	}
+
 	updated := &fusekiv1alpha1.FusekiServer{}
 	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(server), updated); err != nil {
 		t.Fatalf("get updated server: %v", err)
@@ -243,6 +273,110 @@ func TestFusekiServerReconcileDefersBootstrapUntilSecurityReady(t *testing.T) {
 	condition := apimeta.FindStatusCondition(updated.Status.Conditions, securityReadyConditionType)
 	if condition == nil || condition.Status != metav1.ConditionFalse {
 		t.Fatalf("expected security condition false, got %#v", condition)
+	}
+}
+
+func TestFusekiServerReconcileFailsClosedForRangerWithLocalPolicies(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add batch scheme: %v", err)
+	}
+
+	policy := &fusekiv1alpha1.SecurityPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "dataset-policy", Namespace: "default"},
+		Spec: fusekiv1alpha1.SecurityPolicySpec{Rules: []fusekiv1alpha1.SecurityPolicyRule{{
+			Target: fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: "dataset-a"}},
+			Actions: []fusekiv1alpha1.SecurityPolicyAction{
+				fusekiv1alpha1.SecurityPolicyActionRead,
+			},
+			Subjects: []fusekiv1alpha1.SecuritySubject{{Type: fusekiv1alpha1.SecuritySubjectTypeUser, Value: "alice"}},
+		}}},
+	}
+	dataset := &fusekiv1alpha1.Dataset{
+		ObjectMeta: metav1.ObjectMeta{Name: "dataset-a", Namespace: "default"},
+		Spec: fusekiv1alpha1.DatasetSpec{
+			Name:             "primary",
+			SecurityPolicies: []corev1.LocalObjectReference{{Name: "dataset-policy"}},
+		},
+	}
+	server := &fusekiv1alpha1.FusekiServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "standalone", Namespace: "default"},
+		Spec: fusekiv1alpha1.FusekiServerSpec{
+			Image:              "ghcr.io/example/fuseki:6.0.0",
+			DatasetRefs:        []corev1.LocalObjectReference{{Name: "dataset-a"}},
+			SecurityProfileRef: &corev1.LocalObjectReference{Name: "ranger"},
+		},
+	}
+	profile := &fusekiv1alpha1.SecurityProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "ranger", Namespace: "default"},
+		Spec: fusekiv1alpha1.SecurityProfileSpec{
+			Authorization: &fusekiv1alpha1.SecurityAuthorizationSpec{
+				Mode: fusekiv1alpha1.AuthorizationModeRanger,
+				Ranger: &fusekiv1alpha1.RangerAuthorizationSpec{
+					AdminURL:      "https://ranger.example.com",
+					ServiceName:   "fuseki-default",
+					AuthSecretRef: &corev1.LocalObjectReference{Name: "ranger-auth"},
+				},
+			},
+		},
+	}
+	rangerSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "ranger-auth", Namespace: "default"}, Data: map[string][]byte{"username": []byte("admin"), "password": []byte("secret")}}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.Dataset{}).
+		WithStatusSubresource(&fusekiv1alpha1.SecurityProfile{}).
+		WithStatusSubresource(&fusekiv1alpha1.FusekiServer{}).
+		WithObjects(server, dataset, policy, profile, rangerSecret).
+		Build()
+
+	securityReconciler := &SecurityProfileReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := securityReconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(profile)}); err != nil {
+		t.Fatalf("reconcile security profile: %v", err)
+	}
+
+	datasetReconciler := &DatasetReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := datasetReconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dataset)}); err != nil {
+		t.Fatalf("reconcile dataset: %v", err)
+	}
+
+	reconciler := &FusekiServerReconciler{Client: k8sClient, Scheme: scheme}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(server)})
+	if err != nil {
+		t.Fatalf("reconcile server: %v", err)
+	}
+	if result.RequeueAfter != securityProfileRequeueInterval {
+		t.Fatalf("unexpected requeue interval: %s", result.RequeueAfter)
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "standalone"}, deployment); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 0 {
+		t.Fatalf("expected deployment replicas to fail closed at 0, got %#v", deployment.Spec.Replicas)
+	}
+
+	job := &batchv1.Job{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "server-standalone-dataset-a-bootstrap"}, job); err == nil {
+		t.Fatalf("expected bootstrap job to be deferred when Ranger conflicts with local dataset policies")
+	}
+
+	updated := &fusekiv1alpha1.FusekiServer{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(server), updated); err != nil {
+		t.Fatalf("get updated server: %v", err)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, securityReadyConditionType)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "RangerLocalPoliciesUnsupported" {
+		t.Fatalf("unexpected security condition: %#v", condition)
 	}
 }
 
@@ -292,6 +426,13 @@ func TestFusekiServerReconcileWithoutSecurityProfileDoesNotInjectAdminPassword(t
 	deployment := &appsv1.Deployment{}
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "standalone"}, deployment); err != nil {
 		t.Fatalf("get deployment: %v", err)
+	}
+	configMap := &corev1.ConfigMap{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "standalone-config"}, configMap); err != nil {
+		t.Fatalf("get configmap: %v", err)
+	}
+	if got := configMap.Data["run-fuseki.sh"]; !containsLine(got, "exec \"${JAVA_HOME}/bin/java\" -cp \"${launcher_classpath}\" FusekiHttpsLauncher --config=/fuseki-extra/operator-config/fuseki-server.ttl --port ${FUSEKI_PORT:-3030}") {
+		t.Fatalf("expected HTTP startup script to use launcher: %q", got)
 	}
 	if got := envVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "ADMIN_PASSWORD"); got != "" {
 		t.Fatalf("expected no runtime admin password env var, got %q", got)

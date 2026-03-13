@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -33,7 +34,10 @@ func TestSecurityProfileReconcileReady(t *testing.T) {
 		Spec: fusekiv1alpha1.SecurityProfileSpec{
 			AdminCredentialsSecretRef: &corev1.LocalObjectReference{Name: "admin-secret"},
 			TLSSecretRef:              &corev1.LocalObjectReference{Name: "tls-secret"},
-			OIDCIssuerURL:             "https://dex.example.com/dex",
+			OIDC: &fusekiv1alpha1.SecurityOIDCSpec{
+				IssuerURL: "https://dex.example.com/dex",
+				ClientID:  "fuseki-ui",
+			},
 		},
 	}
 	adminSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "admin-secret", Namespace: "default"}}
@@ -77,12 +81,84 @@ func TestSecurityProfileReconcileReady(t *testing.T) {
 	if updated.Status.ConfigMapName != "secure-security" {
 		t.Fatalf("unexpected configmap status name: %q", updated.Status.ConfigMapName)
 	}
+	if updated.Status.AuthorizationMode != fusekiv1alpha1.AuthorizationModeLocal {
+		t.Fatalf("unexpected authorization mode: %q", updated.Status.AuthorizationMode)
+	}
 
 	configMap := &corev1.ConfigMap{}
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "secure-security"}, configMap); err != nil {
 		t.Fatalf("get projected configmap: %v", err)
 	}
-	if got := configMap.Data["security.properties"]; got == "" || !containsLine(got, "oidc.issuerURL=https://dex.example.com/dex") || !containsLine(got, "tls.certFile=/fuseki-extra/security/tls/tls.crt") || !containsLine(got, "tls.keyFile=/fuseki-extra/security/tls/tls.key") {
+	if got := configMap.Data["security.properties"]; got == "" || !containsLine(got, "authorization.mode=Local") || !containsLine(got, "authorization.dir=/fuseki-extra/authorization") || !containsLine(got, "authorization.indexFile=/fuseki-extra/authorization/policies.index") || !containsLine(got, "authorization.failClosed=true") || !containsLine(got, "oidc.issuerURL=https://dex.example.com/dex") || !containsLine(got, "oidc.clientID=fuseki-ui") || !containsLine(got, "tls.certFile=/fuseki-extra/security/tls/tls.crt") || !containsLine(got, "tls.keyFile=/fuseki-extra/security/tls/tls.key") {
+		t.Fatalf("unexpected security properties: %q", got)
+	}
+}
+
+func TestSecurityProfileReconcileReadyInRangerMode(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+
+	profile := &fusekiv1alpha1.SecurityProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "ranger", Namespace: "default"},
+		Spec: fusekiv1alpha1.SecurityProfileSpec{
+			Authorization: &fusekiv1alpha1.SecurityAuthorizationSpec{
+				Mode: fusekiv1alpha1.AuthorizationModeRanger,
+				Ranger: &fusekiv1alpha1.RangerAuthorizationSpec{
+					AdminURL:      "https://ranger.example.com",
+					ServiceName:   "fuseki-default",
+					AuthSecretRef: &corev1.LocalObjectReference{Name: "ranger-auth"},
+					PollInterval:  metav1.Duration{Duration: 45 * time.Second},
+				},
+			},
+		},
+	}
+	rangerSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "ranger-auth", Namespace: "default"},
+		Data: map[string][]byte{
+			"username": []byte("admin"),
+			"password": []byte("secret"),
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.SecurityProfile{}).
+		WithObjects(profile, rangerSecret).
+		Build()
+
+	reconciler := &SecurityProfileReconciler{Client: k8sClient, Scheme: scheme}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(profile)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %s", result.RequeueAfter)
+	}
+
+	updated := &fusekiv1alpha1.SecurityProfile{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(profile), updated); err != nil {
+		t.Fatalf("get updated profile: %v", err)
+	}
+	if updated.Status.AuthorizationMode != fusekiv1alpha1.AuthorizationModeRanger {
+		t.Fatalf("unexpected authorization mode: %q", updated.Status.AuthorizationMode)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, configuredConditionType)
+	if condition == nil || condition.Status != metav1.ConditionTrue {
+		t.Fatalf("expected configured condition true, got %#v", condition)
+	}
+
+	configMap := &corev1.ConfigMap{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "ranger-security"}, configMap); err != nil {
+		t.Fatalf("get projected configmap: %v", err)
+	}
+	if got := configMap.Data["security.properties"]; got == "" || !containsLine(got, "authorization.mode=Ranger") || !containsLine(got, "authorization.dir=/fuseki-extra/authorization") || !containsLine(got, "authorization.indexFile=/fuseki-extra/authorization/policies.index") || !containsLine(got, "authorization.failClosed=true") || !containsLine(got, "ranger.adminURL=https://ranger.example.com") || !containsLine(got, "ranger.serviceName=fuseki-default") || !containsLine(got, "ranger.configFile=/fuseki-extra/authorization/ranger.properties") || !containsLine(got, "ranger.authSecretRef=ranger-auth") || !containsLine(got, "ranger.pollInterval=45s") {
 		t.Fatalf("unexpected security properties: %q", got)
 	}
 }

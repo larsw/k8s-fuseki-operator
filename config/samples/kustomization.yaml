@@ -8,3 +8,10 @@ resources:
   - fuseki_v1alpha1_endpoint.yaml
   - fuseki_v1alpha1_fusekiui.yaml
   - fuseki_v1alpha1_securityprofile.yaml
+  - fuseki_v1alpha1_securityprofile_ranger.yaml
+  - fuseki_v1alpha1_securitypolicy.yaml
+  - fuseki_v1alpha1_shaclpolicy.yaml
+  - fuseki_v1alpha1_importrequest.yaml
+  - fuseki_v1alpha1_exportrequest.yaml
+  - fuseki_v1alpha1_ingestpipeline.yaml
+  - fuseki_v1alpha1_changesubscription.yaml

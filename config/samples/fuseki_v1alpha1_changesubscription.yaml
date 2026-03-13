@@ -1,0 +1,17 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: ChangeSubscription
+metadata:
+  labels:
+    app.kubernetes.io/name: k8s-fuseki-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: example-changesubscription
+  namespace: default
+spec:
+  rdfDeltaServerRef:
+    name: example-delta
+  target:
+    datasetRef:
+      name: example-dataset
+  sink:
+    type: S3
+    uri: s3://example-bucket/changes/example-dataset/

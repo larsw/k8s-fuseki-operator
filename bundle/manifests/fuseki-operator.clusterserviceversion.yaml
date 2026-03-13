@@ -175,7 +175,13 @@ metadata:
             "tlsSecretRef": {
               "name": "example-tls-secret"
             },
-            "oidcIssuerURL": "https://issuer.example.com"
+            "oidc": {
+              "issuerURL": "https://issuer.example.com",
+              "clientID": "fuseki-ui"
+            },
+            "authorization": {
+              "mode": "Local"
+            }
           }
         }
       ]

@@ -64,6 +64,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := fusekicontroller.SetupV020Webhooks(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create validating webhooks")
+		os.Exit(1)
+	}
+
 	if err := (&fusekicontroller.FusekiClusterReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -101,6 +106,54 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		ctrl.Log.WithName("setup").Error(err, "unable to create controller", "controller", "SecurityProfile")
+		os.Exit(1)
+	}
+
+	if err := (&fusekicontroller.SecurityPolicyReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create controller", "controller", "SecurityPolicy")
+		os.Exit(1)
+	}
+
+	if err := (&fusekicontroller.SHACLPolicyReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create controller", "controller", "SHACLPolicy")
+		os.Exit(1)
+	}
+
+	if err := (&fusekicontroller.ImportRequestReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create controller", "controller", "ImportRequest")
+		os.Exit(1)
+	}
+
+	if err := (&fusekicontroller.ExportRequestReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create controller", "controller", "ExportRequest")
+		os.Exit(1)
+	}
+
+	if err := (&fusekicontroller.IngestPipelineReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create controller", "controller", "IngestPipeline")
+		os.Exit(1)
+	}
+
+	if err := (&fusekicontroller.ChangeSubscriptionReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		ctrl.Log.WithName("setup").Error(err, "unable to create controller", "controller", "ChangeSubscription")
 		os.Exit(1)
 	}
 

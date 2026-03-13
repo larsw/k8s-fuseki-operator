@@ -2,6 +2,7 @@ apiVersion: fuseki.apache.org/v1alpha1
 kind: FusekiCluster
 metadata:
   name: example
+  namespace: default
 spec:
   replicas: 3
   image: ghcr.io/larsw/k8s-fuseki-operator/fuseki:6.0.0
@@ -10,6 +11,13 @@ spec:
     name: example-delta
   datasetRefs:
     - name: example-dataset
+  securityProfileRef:
+    name: example-securityprofile
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
   storage:
     accessMode: ReadWriteOnce
     size: 2Gi

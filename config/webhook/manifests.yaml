@@ -1,0 +1,167 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: fuseki-operator-validating-webhook-configuration
+  annotations:
+    cert-manager.io/inject-ca-from: fuseki-system/fuseki-operator-webhook-serving-cert
+webhooks:
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: fuseki-operator-webhook-service
+        namespace: fuseki-system
+        path: /validate-fuseki-apache-org-v1alpha1-dataset
+    failurePolicy: Fail
+    name: vdataset.fuseki.apache.org
+    rules:
+      - apiGroups:
+          - fuseki.apache.org
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - datasets
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: fuseki-operator-webhook-service
+        namespace: fuseki-system
+        path: /validate-fuseki-apache-org-v1alpha1-fusekicluster
+    failurePolicy: Fail
+    name: vfusekicluster.fuseki.apache.org
+    rules:
+      - apiGroups:
+          - fuseki.apache.org
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - fusekiclusters
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: fuseki-operator-webhook-service
+        namespace: fuseki-system
+        path: /validate-fuseki-apache-org-v1alpha1-fusekiserver
+    failurePolicy: Fail
+    name: vfusekiserver.fuseki.apache.org
+    rules:
+      - apiGroups:
+          - fuseki.apache.org
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - fusekiservers
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: fuseki-operator-webhook-service
+        namespace: fuseki-system
+        path: /validate-fuseki-apache-org-v1alpha1-securitypolicy
+    failurePolicy: Fail
+    name: vsecuritypolicy.fuseki.apache.org
+    rules:
+      - apiGroups:
+          - fuseki.apache.org
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - securitypolicies
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: fuseki-operator-webhook-service
+        namespace: fuseki-system
+        path: /validate-fuseki-apache-org-v1alpha1-importrequest
+    failurePolicy: Fail
+    name: vimportrequest.fuseki.apache.org
+    rules:
+      - apiGroups:
+          - fuseki.apache.org
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - importrequests
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: fuseki-operator-webhook-service
+        namespace: fuseki-system
+        path: /validate-fuseki-apache-org-v1alpha1-exportrequest
+    failurePolicy: Fail
+    name: vexportrequest.fuseki.apache.org
+    rules:
+      - apiGroups:
+          - fuseki.apache.org
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - exportrequests
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: fuseki-operator-webhook-service
+        namespace: fuseki-system
+        path: /validate-fuseki-apache-org-v1alpha1-ingestpipeline
+    failurePolicy: Fail
+    name: vingestpipeline.fuseki.apache.org
+    rules:
+      - apiGroups:
+          - fuseki.apache.org
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - ingestpipelines
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: fuseki-operator-webhook-service
+        namespace: fuseki-system
+        path: /validate-fuseki-apache-org-v1alpha1-changesubscription
+    failurePolicy: Fail
+    name: vchangesubscription.fuseki.apache.org
+    rules:
+      - apiGroups:
+          - fuseki.apache.org
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - changesubscriptions
+    sideEffects: None

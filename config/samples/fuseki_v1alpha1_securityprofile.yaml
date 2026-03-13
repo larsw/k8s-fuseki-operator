@@ -2,9 +2,14 @@ apiVersion: fuseki.apache.org/v1alpha1
 kind: SecurityProfile
 metadata:
   name: example-securityprofile
+  namespace: default
 spec:
   adminCredentialsSecretRef:
     name: example-admin-secret
   tlsSecretRef:
     name: example-tls-secret
-  oidcIssuerURL: https://issuer.example.com
+  oidc:
+    issuerURL: https://issuer.example.com
+    clientID: fuseki-ui
+  authorization:
+    mode: Local

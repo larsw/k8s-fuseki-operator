@@ -43,6 +43,7 @@ func (r *SecurityProfileReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	specIssues := validateSecurityProfileSpec(&profile)
 	missingRefs, invalidRefs, err := r.secretReferenceIssues(ctx, &profile)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -52,10 +53,16 @@ func (r *SecurityProfileReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	updated.Status.ObservedGeneration = profile.Generation
 	updated.Status.Phase = "Ready"
 	updated.Status.ConfigMapName = profile.ConfigMapName()
+	updated.Status.AuthorizationMode = profile.DesiredAuthorizationMode()
 	conditionStatus := metav1.ConditionTrue
 	conditionReason := "ReferencesResolved"
 	conditionMessage := "All referenced secrets are available."
-	if len(missingRefs) > 0 || len(invalidRefs) > 0 {
+	if len(specIssues) > 0 {
+		updated.Status.Phase = "Invalid"
+		conditionStatus = metav1.ConditionFalse
+		conditionReason = "InvalidSpec"
+		conditionMessage = joinValidationIssues(specIssues)
+	} else if len(missingRefs) > 0 || len(invalidRefs) > 0 {
 		updated.Status.Phase = "Pending"
 		conditionStatus = metav1.ConditionFalse
 		switch {
@@ -83,6 +90,10 @@ func (r *SecurityProfileReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if err := r.Status().Update(ctx, &profile); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	if len(specIssues) > 0 {
+		return ctrl.Result{}, nil
 	}
 
 	if len(missingRefs) > 0 || len(invalidRefs) > 0 {
@@ -126,7 +137,24 @@ func (r *SecurityProfileReconciler) secretReferenceIssues(ctx context.Context, p
 	}
 
 	missing := make([]string, 0, len(checks))
-	invalid := make([]string, 0, len(checks))
+	invalid := make([]string, 0, len(checks)+2)
+	if profile.RangerAuthorizationEnabled() {
+		if profile.Spec.Authorization.Ranger.AdminURL == "" {
+			invalid = append(invalid, "authorization.ranger.adminURL must be set when authorization mode is Ranger")
+		}
+		if profile.Spec.Authorization.Ranger.ServiceName == "" {
+			invalid = append(invalid, "authorization.ranger.serviceName must be set when authorization mode is Ranger")
+		}
+		checks = append(checks, struct {
+			label        string
+			ref          *corev1.LocalObjectReference
+			requiredKeys []string
+		}{
+			label:        "authorization.ranger.authSecretRef",
+			ref:          profile.Spec.Authorization.Ranger.AuthSecretRef,
+			requiredKeys: []string{"username", "password"},
+		})
+	}
 	for _, check := range checks {
 		if check.ref == nil || check.ref.Name == "" {
 			continue
@@ -192,7 +220,11 @@ func (r *SecurityProfileReconciler) requestsForSecret(ctx context.Context, obj c
 }
 
 func securityProfileReferencesSecret(profile *fusekiv1alpha1.SecurityProfile, secretName string) bool {
-	for _, ref := range []*corev1.LocalObjectReference{profile.Spec.AdminCredentialsSecretRef, profile.Spec.TLSSecretRef} {
+	refs := []*corev1.LocalObjectReference{profile.Spec.AdminCredentialsSecretRef, profile.Spec.TLSSecretRef}
+	if profile.RangerAuthorizationEnabled() {
+		refs = append(refs, profile.Spec.Authorization.Ranger.AuthSecretRef)
+	}
+	for _, ref := range refs {
 		if ref != nil && ref.Name == secretName {
 			return true
 		}

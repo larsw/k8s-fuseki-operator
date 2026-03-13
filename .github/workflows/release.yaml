@@ -134,6 +134,7 @@ jobs:
           make release-verify
           make bundle-validate
           make docker-smoke-controller
+          make docker-smoke-fuseki-all
       - name: Build release artifacts
         run: |
           RELEASE_COMMIT="${GITHUB_SHA::12}" \

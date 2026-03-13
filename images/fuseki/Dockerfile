@@ -45,17 +45,33 @@ RUN set -eux; \
 
 FROM eclipse-temurin:21-jdk-alpine AS launcher-build
 
-COPY --from=fuseki-base /opt/fuseki/fuseki-server.jar /tmp/fuseki-server.jar
-COPY images/fuseki/FusekiHttpsLauncher.java /tmp/FusekiHttpsLauncher.java
+ARG ACCUMULO_ACCESS_VERSION=1.0.0-beta
+ARG COMMONS_JEXL_VERSION=3.4.0
+ARG COMMONS_LOGGING_VERSION=1.3.4
+ARG GSON_VERSION=2.11.0
 
 RUN set -eux; \
+    apk add --no-cache curl
+
+COPY --from=fuseki-base /opt/fuseki/fuseki-server.jar /tmp/fuseki-server.jar
+COPY images/fuseki/FusekiHttpsLauncher.java /tmp/FusekiHttpsLauncher.java
+COPY images/fuseki/FusekiAuthorizationFilter.java /tmp/FusekiAuthorizationFilter.java
+COPY images/fuseki/FusekiRangerAuthorizationFilter.java /tmp/FusekiRangerAuthorizationFilter.java
+
+RUN set -eux; \
+    mkdir -p /tmp/deps; \
+    curl --location --silent --show-error --fail --retry 3 --output /tmp/deps/accumulo-access.jar "https://repo1.maven.org/maven2/org/apache/accumulo/accumulo-access/${ACCUMULO_ACCESS_VERSION}/accumulo-access-${ACCUMULO_ACCESS_VERSION}.jar"; \
+    curl --location --silent --show-error --fail --retry 3 --output /tmp/deps/commons-jexl3.jar "https://repo1.maven.org/maven2/org/apache/commons/commons-jexl3/${COMMONS_JEXL_VERSION}/commons-jexl3-${COMMONS_JEXL_VERSION}.jar"; \
+    curl --location --silent --show-error --fail --retry 3 --output /tmp/deps/commons-logging.jar "https://repo1.maven.org/maven2/commons-logging/commons-logging/${COMMONS_LOGGING_VERSION}/commons-logging-${COMMONS_LOGGING_VERSION}.jar"; \
+    curl --location --silent --show-error --fail --retry 3 --output /tmp/deps/gson.jar "https://repo1.maven.org/maven2/com/google/code/gson/gson/${GSON_VERSION}/gson-${GSON_VERSION}.jar"; \
     mkdir -p /tmp/classes; \
-    javac -cp /tmp/fuseki-server.jar -d /tmp/classes /tmp/FusekiHttpsLauncher.java; \
+	javac -cp "/tmp/fuseki-server.jar:/tmp/deps/*" -d /tmp/classes /tmp/FusekiHttpsLauncher.java /tmp/FusekiAuthorizationFilter.java /tmp/FusekiRangerAuthorizationFilter.java; \
     jar --create --file /tmp/fuseki-operator-launcher.jar -C /tmp/classes .
 
 FROM fuseki-base
 
 COPY --from=launcher-build --chown=fuseki:fuseki /tmp/fuseki-operator-launcher.jar ${FUSEKI_HOME}/fuseki-operator-launcher.jar
+COPY --from=launcher-build --chown=fuseki:fuseki /tmp/deps ${FUSEKI_HOME}/fuseki-operator-deps
 
 LABEL org.opencontainers.image.title="Apache Jena Fuseki"
 LABEL org.opencontainers.image.description="Project-owned Apache Jena Fuseki image for fuseki-operator"

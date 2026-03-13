@@ -54,6 +54,7 @@ type FusekiClusterSpec struct {
 	LeaderElection     FusekiLeaderElectionSpec     `json:"leaderElection,omitempty"`
 	Services           FusekiClusterServiceSpec     `json:"services,omitempty"`
 	Observability      WorkloadObservabilitySpec    `json:"observability,omitempty"`
+	Autoscaling        *FusekiAutoscalingSpec       `json:"autoscaling,omitempty"`
 
 	// Affinity configures pod scheduling constraints for Fuseki server pods.
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
@@ -401,16 +402,23 @@ type FusekiUIList struct {
 	Items           []FusekiUI `json:"items"`
 }
 
+type SecurityOIDCSpec struct {
+	IssuerURL string `json:"issuerURL,omitempty"`
+	ClientID  string `json:"clientID,omitempty"`
+}
+
 type SecurityProfileSpec struct {
 	AdminCredentialsSecretRef *corev1.LocalObjectReference `json:"adminCredentialsSecretRef,omitempty"`
 	TLSSecretRef              *corev1.LocalObjectReference `json:"tlsSecretRef,omitempty"`
-	OIDCIssuerURL             string                       `json:"oidcIssuerURL,omitempty"`
+	OIDC                      *SecurityOIDCSpec            `json:"oidc,omitempty"`
+	Authorization             *SecurityAuthorizationSpec   `json:"authorization,omitempty"`
 }
 
 type SecurityProfileStatus struct {
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 	Phase              string             `json:"phase,omitempty"`
 	ConfigMapName      string             `json:"configMapName,omitempty"`
+	AuthorizationMode  AuthorizationMode  `json:"authorizationMode,omitempty"`
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }
 
@@ -1039,6 +1047,22 @@ func (in *FusekiServer) PersistentVolumeClaimName() string {
 
 func (in *SecurityProfile) ConfigMapName() string {
 	return in.Name + "-security"
+}
+
+func (in *SecurityProfile) DesiredOIDCIssuerURL() string {
+	if in.Spec.OIDC != nil && in.Spec.OIDC.IssuerURL != "" {
+		return in.Spec.OIDC.IssuerURL
+	}
+
+	return ""
+}
+
+func (in *SecurityProfile) DesiredOIDCClientID() string {
+	if in.Spec.OIDC != nil && in.Spec.OIDC.ClientID != "" {
+		return in.Spec.OIDC.ClientID
+	}
+
+	return ""
 }
 
 func (in *BackupPolicy) DesiredBackupImage() string {

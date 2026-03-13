@@ -51,8 +51,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Smoke test Fuseki image scaffold
-        run: make docker-smoke-fuseki
+      - name: Smoke test Fuseki image paths
+        run: make docker-smoke-fuseki-all
       - name: Smoke test RDF Delta image scaffold
         run: make docker-smoke-rdf-delta
 

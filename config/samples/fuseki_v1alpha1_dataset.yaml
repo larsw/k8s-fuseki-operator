@@ -6,6 +6,8 @@ metadata:
 spec:
   name: primary
   type: TDB2
+  securityPolicies:
+    - name: example-securitypolicy
   spatial:
     enabled: true
     assembler: spatial:EntityMap

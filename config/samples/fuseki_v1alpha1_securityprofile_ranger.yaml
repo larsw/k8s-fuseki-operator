@@ -1,0 +1,19 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: SecurityProfile
+metadata:
+  labels:
+    app.kubernetes.io/name: k8s-fuseki-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: example-securityprofile-ranger
+  namespace: default
+spec:
+  authorization:
+    mode: Ranger
+    ranger:
+      adminURL: https://ranger-admin.example.internal
+      serviceName: fuseki-prod
+      authSecretRef:
+        name: ranger-admin-credentials
+  oidc:
+    issuerURL: https://issuer.example.com/realms/fuseki
+    clientID: fuseki-ui

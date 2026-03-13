@@ -57,7 +57,7 @@ func (r *FusekiClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	securityStatus, err := resolveSecurityDependency(ctx, r.Client, cluster.Namespace, cluster.Spec.SecurityProfileRef)
+	securityStatus, err := resolveFusekiWorkloadSecurityDependency(ctx, r.Client, cluster.Namespace, cluster.Spec.SecurityProfileRef, cluster.Spec.DatasetRefs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -78,7 +78,7 @@ func (r *FusekiClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	statefulSet, err := r.reconcileStatefulSet(ctx, &cluster, securityStatus.Profile, securityStatus.AdminSecretRef)
+	statefulSet, err := r.reconcileStatefulSet(ctx, &cluster, securityStatus.Profile, securityStatus.AdminSecretRef, workloadSecurityReady(securityStatus))
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -91,7 +91,7 @@ func (r *FusekiClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.reconcilePodRouting(ctx, &cluster, writePodName); err != nil {
 		return ctrl.Result{}, err
 	}
-	if cluster.Spec.SecurityProfileRef == nil || securityStatus.Status == metav1.ConditionTrue {
+	if cluster.Spec.SecurityProfileRef == nil || workloadSecurityReady(securityStatus) {
 		if err := r.reconcileDatasetBootstrapJobs(ctx, &cluster); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -263,7 +263,7 @@ func (r *FusekiClusterReconciler) reconcileService(ctx context.Context, cluster 
 	return err
 }
 
-func (r *FusekiClusterReconciler) reconcileStatefulSet(ctx context.Context, cluster *fusekiv1alpha1.FusekiCluster, securityProfile *fusekiv1alpha1.SecurityProfile, adminSecretRef *corev1.LocalObjectReference) (*appsv1.StatefulSet, error) {
+func (r *FusekiClusterReconciler) reconcileStatefulSet(ctx context.Context, cluster *fusekiv1alpha1.FusekiCluster, securityProfile *fusekiv1alpha1.SecurityProfile, adminSecretRef *corev1.LocalObjectReference, securityReady bool) (*appsv1.StatefulSet, error) {
 	statefulSet := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.StatefulSetName(),
@@ -273,7 +273,11 @@ func (r *FusekiClusterReconciler) reconcileStatefulSet(ctx context.Context, clus
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, statefulSet, func() error {
 		statefulSet.Labels = mergeStringMaps(clusterLabels(cluster), map[string]string{"fuseki.apache.org/component": "server"})
 		statefulSet.Spec.ServiceName = cluster.HeadlessServiceName()
-		statefulSet.Spec.Replicas = ptrTo(cluster.DesiredReplicas())
+		replicas := cluster.DesiredReplicas()
+		if !securityReady {
+			replicas = 0
+		}
+		statefulSet.Spec.Replicas = ptrTo(replicas)
 		statefulSet.Spec.PodManagementPolicy = appsv1.OrderedReadyPodManagement
 		statefulSet.Spec.UpdateStrategy = appsv1.StatefulSetUpdateStrategy{Type: appsv1.RollingUpdateStatefulSetStrategyType}
 		statefulSet.Spec.Selector = &metav1.LabelSelector{MatchLabels: clusterSelectorLabels(cluster)}

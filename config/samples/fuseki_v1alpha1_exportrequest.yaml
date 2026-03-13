@@ -1,0 +1,17 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: ExportRequest
+metadata:
+  labels:
+    app.kubernetes.io/name: k8s-fuseki-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: example-exportrequest
+  namespace: default
+spec:
+  target:
+    datasetRef:
+      name: example-dataset
+  sink:
+    type: S3
+    uri: s3://example-bucket/exports/example-dataset.nq.gz
+    format: application/n-quads
+    compression: gzip

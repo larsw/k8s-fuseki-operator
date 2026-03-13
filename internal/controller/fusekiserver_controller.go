@@ -43,7 +43,7 @@ func (r *FusekiServerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.reconcileConfigMap(ctx, &server); err != nil {
 		return ctrl.Result{}, err
 	}
-	securityStatus, err := resolveSecurityDependency(ctx, r.Client, server.Namespace, server.Spec.SecurityProfileRef)
+	securityStatus, err := resolveFusekiWorkloadSecurityDependency(ctx, r.Client, server.Namespace, server.Spec.SecurityProfileRef, server.Spec.DatasetRefs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -57,11 +57,11 @@ func (r *FusekiServerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	deployment, err := r.reconcileDeployment(ctx, &server, securityStatus.Profile, securityStatus.AdminSecretRef)
+	deployment, err := r.reconcileDeployment(ctx, &server, securityStatus.Profile, securityStatus.AdminSecretRef, workloadSecurityReady(securityStatus))
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if server.Spec.SecurityProfileRef == nil || securityStatus.Status == metav1.ConditionTrue {
+	if server.Spec.SecurityProfileRef == nil || workloadSecurityReady(securityStatus) {
 		if err := r.reconcileDatasetBootstrapJobs(ctx, &server); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -189,10 +189,15 @@ func (r *FusekiServerReconciler) reconcilePVC(ctx context.Context, server *fusek
 	return err
 }
 
-func (r *FusekiServerReconciler) reconcileDeployment(ctx context.Context, server *fusekiv1alpha1.FusekiServer, securityProfile *fusekiv1alpha1.SecurityProfile, adminSecretRef *corev1.LocalObjectReference) (*appsv1.Deployment, error) {
+func (r *FusekiServerReconciler) reconcileDeployment(ctx context.Context, server *fusekiv1alpha1.FusekiServer, securityProfile *fusekiv1alpha1.SecurityProfile, adminSecretRef *corev1.LocalObjectReference, securityReady bool) (*appsv1.Deployment, error) {
 	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: server.DeploymentName(), Namespace: server.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deployment, func() error {
 		deployment.Labels = mergeStringMaps(fusekiServerLabels(server), map[string]string{"fuseki.apache.org/component": "server"})
+		replicas := int32(1)
+		if !securityReady {
+			replicas = 0
+		}
+		deployment.Spec.Replicas = ptrTo(replicas)
 		deployment.Spec.Selector = &metav1.LabelSelector{MatchLabels: fusekiServerSelectorLabels(server)}
 		deployment.Spec.Template.ObjectMeta.Labels = mergeStringMaps(fusekiServerSelectorLabels(server), map[string]string{"fuseki.apache.org/component": "server"})
 		deployment.Spec.Template.ObjectMeta.Annotations = nil

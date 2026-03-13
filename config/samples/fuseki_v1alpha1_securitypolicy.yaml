@@ -1,0 +1,38 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: SecurityPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: k8s-fuseki-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: example-securitypolicy
+  namespace: default
+spec:
+  description: Allow analysts to query a public named graph and grant admins full access.
+  rules:
+    - target:
+        datasetRef:
+          name: example-dataset
+        namedGraph: https://example.com/graphs/public
+      subjects:
+        - type: Group
+          value: analysts
+      actions:
+        - Query
+        - Read
+      expressionType: Simple
+      expression: PUBLIC
+    - target:
+        datasetRef:
+          name: example-dataset
+      subjects:
+        - type: User
+          value: data-admin
+      actions:
+        - Query
+        - Read
+        - Update
+        - Write
+        - Admin
+      effect: Allow
+      expressionType: Simple
+      expression: ADMIN

@@ -1,0 +1,19 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: IngestPipeline
+metadata:
+  labels:
+    app.kubernetes.io/name: k8s-fuseki-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: example-ingestpipeline
+  namespace: default
+spec:
+  target:
+    datasetRef:
+      name: example-dataset
+  source:
+    type: URL
+    uri: https://data.example.com/events/latest.nq
+    format: application/n-quads
+  shaclPolicyRef:
+    name: example-shaclpolicy
+  schedule: "*/15 * * * *"

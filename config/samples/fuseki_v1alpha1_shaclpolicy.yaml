@@ -1,0 +1,23 @@
+apiVersion: fuseki.apache.org/v1alpha1
+kind: SHACLPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: k8s-fuseki-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: example-shaclpolicy
+  namespace: default
+spec:
+  sources:
+    - type: Inline
+      inline: |
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <https://example.com/ns#> .
+
+        ex:EventShape
+          a sh:NodeShape ;
+          sh:targetClass ex:Event ;
+          sh:property [
+            sh:path ex:id ;
+            sh:minCount 1 ;
+          ] .
+  failureAction: Reject

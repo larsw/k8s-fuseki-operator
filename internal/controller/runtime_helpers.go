@@ -18,6 +18,10 @@ const (
 	securityTLSCertFile      = securityTLSMountPath + "/tls.crt"
 	securityTLSKeyFile       = securityTLSMountPath + "/tls.key"
 	securityTLSCAFile        = securityTLSMountPath + "/ca.crt"
+	datasetConfigMountPath   = "/fuseki-extra/dataset-config"
+	authorizationConfigDir   = "/fuseki-extra/authorization"
+	authorizationIndexFile   = authorizationConfigDir + "/policies.index"
+	rangerConfigFile         = authorizationConfigDir + "/ranger.properties"
 )
 
 type datasetBootstrapTarget struct {
@@ -122,6 +126,7 @@ func renderFusekiConfigData(resourceName string, datasetRefs []corev1.LocalObjec
 
 	runScript := strings.Join([]string{
 		"set -eu",
+		"launcher_classpath=\"/opt/fuseki/fuseki-server.jar:/opt/fuseki/fuseki-operator-launcher.jar:/opt/fuseki/fuseki-operator-deps/*\"",
 		"if [ -n \"${SECURITY_PROFILE_TLS_CERT_FILE:-}\" ] || [ -n \"${SECURITY_PROFILE_TLS_KEY_FILE:-}\" ]; then",
 		"  if [ ! -f \"${SECURITY_PROFILE_TLS_CERT_FILE:-}\" ] || [ ! -f \"${SECURITY_PROFILE_TLS_KEY_FILE:-}\" ]; then",
 		"    echo \"TLS configuration requested but certificate files are missing\" >&2",
@@ -143,9 +148,9 @@ func renderFusekiConfigData(resourceName string, datasetRefs []corev1.LocalObjec
 		"  chmod 600 \"${keystore_file}\"",
 		"  printf '{ \"keystore\": \"%s\", \"passwd\": \"%s\" }\n' \"${keystore_file}\" \"${https_password}\" > \"${https_config}\"",
 		"  PATH=/opt/fuseki:${PATH:-}",
-		"  exec \"${JAVA_HOME}/bin/java\" -cp /opt/fuseki/fuseki-server.jar:/opt/fuseki/fuseki-operator-launcher.jar FusekiHttpsLauncher --https=\"${https_config}\" --httpsPort ${FUSEKI_PORT:-" + fmt.Sprintf("%d", httpPort) + "}",
+		"  exec \"${JAVA_HOME}/bin/java\" -cp \"${launcher_classpath}\" FusekiHttpsLauncher --config=/fuseki-extra/operator-config/fuseki-server.ttl --https=\"${https_config}\" --httpsPort ${FUSEKI_PORT:-" + fmt.Sprintf("%d", httpPort) + "}",
 		"fi",
-		"exec /opt/fuseki/fuseki-server --config=/fuseki-extra/operator-config/fuseki-server.ttl --port ${FUSEKI_PORT:-" + fmt.Sprintf("%d", httpPort) + "}",
+		"exec \"${JAVA_HOME}/bin/java\" -cp \"${launcher_classpath}\" FusekiHttpsLauncher --config=/fuseki-extra/operator-config/fuseki-server.ttl --port ${FUSEKI_PORT:-" + fmt.Sprintf("%d", httpPort) + "}",
 	}, "\n") + "\n"
 
 	return map[string]string{
@@ -181,11 +186,21 @@ func fusekiDatasetConfigVolumeForRefs(refs []corev1.LocalObjectReference) corev1
 
 	sources := make([]corev1.VolumeProjection, 0, len(refs))
 	for _, ref := range refs {
+		if ref.Name == "" {
+			continue
+		}
 		optional := true
 		sources = append(sources, corev1.VolumeProjection{
 			ConfigMap: &corev1.ConfigMapProjection{
 				LocalObjectReference: corev1.LocalObjectReference{Name: ref.Name + "-dataset-config"},
 				Optional:             &optional,
+				Items: []corev1.KeyToPath{
+					{Key: "dataset.properties", Path: ref.Name + "/dataset.properties"},
+					{Key: "preload.txt", Path: ref.Name + "/preload.txt"},
+					{Key: "spatial.properties", Path: ref.Name + "/spatial.properties"},
+					{Key: "security-policies.json", Path: ref.Name + "/security-policies.json"},
+					{Key: "security-policies.missing", Path: ref.Name + "/security-policies.missing"},
+				},
 			},
 		})
 	}
@@ -231,6 +246,7 @@ func renderSecurityProfileConfigData(profile *fusekiv1alpha1.SecurityProfile) ma
 	}
 
 	properties := make([]string, 0, 8)
+	properties = append(properties, "authorization.mode="+string(profile.DesiredAuthorizationMode()))
 	if profile.Spec.AdminCredentialsSecretRef != nil && profile.Spec.AdminCredentialsSecretRef.Name != "" {
 		properties = append(properties, "admin.secretRef="+profile.Spec.AdminCredentialsSecretRef.Name)
 	}
@@ -243,8 +259,27 @@ func renderSecurityProfileConfigData(profile *fusekiv1alpha1.SecurityProfile) ma
 			"tls.caFile="+securityTLSCAFile,
 		)
 	}
-	if profile.Spec.OIDCIssuerURL != "" {
-		properties = append(properties, "oidc.issuerURL="+profile.Spec.OIDCIssuerURL)
+	if profile.DesiredOIDCIssuerURL() != "" {
+		properties = append(properties, "oidc.issuerURL="+profile.DesiredOIDCIssuerURL())
+	}
+	if profile.DesiredOIDCClientID() != "" {
+		properties = append(properties, "oidc.clientID="+profile.DesiredOIDCClientID())
+	}
+	properties = append(properties,
+		"authorization.dir="+authorizationConfigDir,
+		"authorization.indexFile="+authorizationIndexFile,
+		"authorization.failClosed=true",
+	)
+	if profile.RangerAuthorizationEnabled() {
+		properties = append(properties,
+			"ranger.adminURL="+profile.Spec.Authorization.Ranger.AdminURL,
+			"ranger.serviceName="+profile.Spec.Authorization.Ranger.ServiceName,
+			"ranger.configFile="+rangerConfigFile,
+			"ranger.pollInterval="+desiredRangerPollInterval(profile),
+		)
+		if profile.Spec.Authorization.Ranger.AuthSecretRef != nil && profile.Spec.Authorization.Ranger.AuthSecretRef.Name != "" {
+			properties = append(properties, "ranger.authSecretRef="+profile.Spec.Authorization.Ranger.AuthSecretRef.Name)
+		}
 	}
 	sort.Strings(properties)
 
@@ -262,9 +297,47 @@ func fusekiSecurityEnvVars(profile *fusekiv1alpha1.SecurityProfile) []corev1.Env
 		{Name: "SECURITY_PROFILE_NAME", Value: profile.Name},
 		{Name: "SECURITY_PROFILE_CONFIG_DIR", Value: "/fuseki-extra/security"},
 		{Name: "SECURITY_PROFILE_CONFIG", Value: "/fuseki-extra/security/security.properties"},
+		{Name: "SECURITY_PROFILE_AUTHORIZATION_MODE", Value: string(profile.DesiredAuthorizationMode())},
+		{Name: "FUSEKI_DATASET_CONFIG_DIR", Value: datasetConfigMountPath},
+		{Name: "FUSEKI_AUTHORIZATION_DIR", Value: authorizationConfigDir},
+		{Name: "FUSEKI_AUTHORIZATION_INDEX", Value: authorizationIndexFile},
+		{Name: "FUSEKI_AUTHORIZATION_FAIL_CLOSED", Value: "true"},
 	}
-	if profile.Spec.OIDCIssuerURL != "" {
-		env = append(env, corev1.EnvVar{Name: "SECURITY_PROFILE_OIDC_ISSUER", Value: profile.Spec.OIDCIssuerURL})
+	if profile.DesiredOIDCIssuerURL() != "" {
+		env = append(env, corev1.EnvVar{Name: "SECURITY_PROFILE_OIDC_ISSUER", Value: profile.DesiredOIDCIssuerURL()})
+	}
+	if profile.DesiredOIDCClientID() != "" {
+		env = append(env, corev1.EnvVar{Name: "SECURITY_PROFILE_OIDC_CLIENT_ID", Value: profile.DesiredOIDCClientID()})
+	}
+	if profile.RangerAuthorizationEnabled() {
+		env = append(env,
+			corev1.EnvVar{Name: "SECURITY_PROFILE_RANGER_ADMIN_URL", Value: profile.Spec.Authorization.Ranger.AdminURL},
+			corev1.EnvVar{Name: "SECURITY_PROFILE_RANGER_SERVICE_NAME", Value: profile.Spec.Authorization.Ranger.ServiceName},
+			corev1.EnvVar{Name: "SECURITY_PROFILE_RANGER_CONFIG", Value: rangerConfigFile},
+			corev1.EnvVar{Name: "SECURITY_PROFILE_RANGER_POLL_INTERVAL", Value: desiredRangerPollInterval(profile)},
+		)
+		if profile.Spec.Authorization.Ranger.AuthSecretRef != nil && profile.Spec.Authorization.Ranger.AuthSecretRef.Name != "" {
+			optional := true
+			env = append(env,
+				corev1.EnvVar{Name: "SECURITY_PROFILE_RANGER_AUTH_SECRET", Value: profile.Spec.Authorization.Ranger.AuthSecretRef.Name},
+				corev1.EnvVar{
+					Name: "SECURITY_PROFILE_RANGER_USERNAME",
+					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: *profile.Spec.Authorization.Ranger.AuthSecretRef,
+						Key:                  "username",
+						Optional:             &optional,
+					}},
+				},
+				corev1.EnvVar{
+					Name: "SECURITY_PROFILE_RANGER_PASSWORD",
+					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: *profile.Spec.Authorization.Ranger.AuthSecretRef,
+						Key:                  "password",
+						Optional:             &optional,
+					}},
+				},
+			)
+		}
 	}
 	if profile.Spec.TLSSecretRef != nil && profile.Spec.TLSSecretRef.Name != "" {
 		env = append(env,
@@ -278,6 +351,16 @@ func fusekiSecurityEnvVars(profile *fusekiv1alpha1.SecurityProfile) []corev1.Env
 	}
 
 	return env
+}
+
+func desiredRangerPollInterval(profile *fusekiv1alpha1.SecurityProfile) string {
+	if profile == nil || !profile.RangerAuthorizationEnabled() {
+		return "30s"
+	}
+	if profile.Spec.Authorization.Ranger.PollInterval.Duration > 0 {
+		return profile.Spec.Authorization.Ranger.PollInterval.Duration.String()
+	}
+	return "30s"
 }
 
 func fusekiSecurityConfigVolume(profile *fusekiv1alpha1.SecurityProfile) *corev1.Volume {

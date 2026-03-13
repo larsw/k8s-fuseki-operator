@@ -950,6 +950,41 @@ spec:
                         x-kubernetes-list-type: atomic
                     type: object
                 type: object
+              autoscaling:
+                properties:
+                  enabled:
+                    type: boolean
+                  maxReplicas:
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minReplicas:
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  targetCPUUtilizationPercentage:
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                  targetMemoryUtilizationPercentage:
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: maxReplicas is required when autoscaling is enabled
+                  rule: '!self.enabled || self.maxReplicas > 0'
+                - message: minReplicas is required when autoscaling is enabled
+                  rule: '!self.enabled || has(self.minReplicas)'
+                - message: at least one autoscaling target must be configured when
+                    autoscaling is enabled
+                  rule: '!self.enabled || has(self.targetCPUUtilizationPercentage)
+                    || has(self.targetMemoryUtilizationPercentage)'
+                - message: minReplicas must be less than or equal to maxReplicas
+                  rule: '!has(self.minReplicas) || self.maxReplicas == 0 || self.minReplicas
+                    <= self.maxReplicas'
               datasetRefs:
                 items:
                   description: |-

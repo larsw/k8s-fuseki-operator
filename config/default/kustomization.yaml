@@ -3,3 +3,4 @@ resources:
   - ../crd
   - ../manager
   - ../rbac
+  - ../webhook

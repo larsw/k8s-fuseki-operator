@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -108,6 +109,131 @@ func TestDatasetReconcileStoresDefinedPhase(t *testing.T) {
 	}
 }
 
+func TestDatasetReconcileBundlesSecurityPolicies(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+
+	dataset := &fusekiv1alpha1.Dataset{
+		ObjectMeta: metav1.ObjectMeta{Name: "secured-dataset", Namespace: "default"},
+		Spec: fusekiv1alpha1.DatasetSpec{
+			Name:             "primary",
+			SecurityPolicies: []corev1.LocalObjectReference{{Name: "example-securitypolicy"}},
+		},
+	}
+	policy := &fusekiv1alpha1.SecurityPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-securitypolicy", Namespace: "default"},
+		Spec: fusekiv1alpha1.SecurityPolicySpec{
+			Rules: []fusekiv1alpha1.SecurityPolicyRule{{
+				Target: fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: "secured-dataset"}},
+				Actions: []fusekiv1alpha1.SecurityPolicyAction{
+					fusekiv1alpha1.SecurityPolicyActionQuery,
+				},
+				Subjects: []fusekiv1alpha1.SecuritySubject{{
+					Type:  fusekiv1alpha1.SecuritySubjectTypeGroup,
+					Value: "analysts",
+				}},
+				Expression: "PUBLIC",
+			}},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.Dataset{}).
+		WithObjects(dataset, policy).
+		Build()
+
+	reconciler := &DatasetReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dataset)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	configMap := &corev1.ConfigMap{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: dataset.ConfigMapName()}, configMap); err != nil {
+		t.Fatalf("get configmap: %v", err)
+	}
+
+	bundle := configMap.Data["security-policies.json"]
+	if !strings.Contains(bundle, `"name": "example-securitypolicy"`) || !strings.Contains(bundle, `"effect": "Allow"`) || !strings.Contains(bundle, `"expressionType": "Simple"`) {
+		t.Fatalf("unexpected security policy bundle: %q", bundle)
+	}
+	if _, exists := configMap.Data["security-policies.missing"]; exists {
+		t.Fatalf("did not expect missing-policy marker when all policies resolve")
+	}
+
+	updated := &fusekiv1alpha1.Dataset{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(dataset), updated); err != nil {
+		t.Fatalf("get updated dataset: %v", err)
+	}
+	if updated.Status.Phase != "Defined" {
+		t.Fatalf("unexpected dataset phase: %q", updated.Status.Phase)
+	}
+}
+
+func TestDatasetReconcilePendingWhenSecurityPolicyMissing(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+
+	dataset := &fusekiv1alpha1.Dataset{
+		ObjectMeta: metav1.ObjectMeta{Name: "secured-dataset", Namespace: "default"},
+		Spec: fusekiv1alpha1.DatasetSpec{
+			Name:             "primary",
+			SecurityPolicies: []corev1.LocalObjectReference{{Name: "missing-policy"}},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.Dataset{}).
+		WithObjects(dataset).
+		Build()
+
+	reconciler := &DatasetReconciler{Client: k8sClient, Scheme: scheme}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dataset)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	updated := &fusekiv1alpha1.Dataset{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(dataset), updated); err != nil {
+		t.Fatalf("get updated dataset: %v", err)
+	}
+	if updated.Status.Phase != "Pending" {
+		t.Fatalf("unexpected dataset phase: %q", updated.Status.Phase)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, configuredConditionType)
+	if condition == nil || condition.Reason != "SecurityPoliciesMissing" {
+		t.Fatalf("expected SecurityPoliciesMissing condition, got %#v", condition)
+	}
+	if !strings.Contains(condition.Message, "missing-policy") {
+		t.Fatalf("unexpected condition message: %q", condition.Message)
+	}
+
+	configMap := &corev1.ConfigMap{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: dataset.ConfigMapName()}, configMap); err != nil {
+		t.Fatalf("get configmap: %v", err)
+	}
+	if got := configMap.Data["security-policies.missing"]; !strings.Contains(got, "missing-policy") {
+		t.Fatalf("unexpected missing-policy marker: %q", got)
+	}
+	if _, exists := configMap.Data["security-policies.json"]; exists {
+		t.Fatalf("did not expect resolved security policy bundle when references are missing")
+	}
+}
+
 func TestDatasetBootstrapContainerWaitsForWriteService(t *testing.T) {
 	t.Helper()
 
@@ -174,6 +300,24 @@ func secretVolumeName(volumes []corev1.Volume, name string) string {
 		}
 	}
 	return ""
+}
+
+func projectedConfigMapPaths(volumes []corev1.Volume, name string) map[string]string {
+	paths := map[string]string{}
+	for _, volume := range volumes {
+		if volume.Name != name || volume.Projected == nil {
+			continue
+		}
+		for _, source := range volume.Projected.Sources {
+			if source.ConfigMap == nil {
+				continue
+			}
+			for _, item := range source.ConfigMap.Items {
+				paths[item.Key] = item.Path
+			}
+		}
+	}
+	return paths
 }
 
 func containsLine(content, needle string) bool {

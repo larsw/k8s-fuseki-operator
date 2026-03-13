@@ -1,0 +1,10 @@
+resources:
+  - fuseki.apache.org_backuppolicies.yaml
+  - fuseki.apache.org_datasets.yaml
+  - fuseki.apache.org_endpoints.yaml
+  - fuseki.apache.org_fusekiclusters.yaml
+  - fuseki.apache.org_fusekiservers.yaml
+  - fuseki.apache.org_fusekiuis.yaml
+  - fuseki.apache.org_rdfdeltaservers.yaml
+  - fuseki.apache.org_restorerequests.yaml
+  - fuseki.apache.org_securityprofiles.yaml
