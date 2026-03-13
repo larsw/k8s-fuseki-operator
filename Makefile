@@ -14,7 +14,7 @@ CONTROLLER_GEN_VERSION ?= v0.20.1
 SETUP_ENVTEST = $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 ENVTEST_K8S_VERSION ?= 1.35.x
 
-.PHONY: fmt vet test envtest e2e-k3d-m3 e2e-k3d-m4-oidc e2e-k3d-m4-tls e2e-k3d-m5-backup-restore e2e-k3d-fusekiui-ingress run build-fusekictl run-fusekictl release-sync release-verify release-artifacts helm-lint helm-test bundle-refresh-crds bundle-validate bundle-build generate manifests docker-build-fuseki docker-build-rdf-delta docker-smoke-fuseki docker-smoke-fuseki-ranger docker-smoke-fuseki-all docker-smoke-rdf-delta tidy
+.PHONY: fmt vet test verify envtest e2e-k3d-m3 e2e-k3d-m4-oidc e2e-k3d-m4-tls e2e-k3d-m5-backup-restore e2e-k3d-fusekiui-ingress run build-fusekictl run-fusekictl release-sync release-verify release-artifacts helm-lint helm-test bundle-refresh-crds bundle-validate bundle-build generate manifests docker-build-fuseki docker-build-rdf-delta docker-smoke-fuseki docker-smoke-fuseki-ranger docker-smoke-fuseki-all docker-smoke-rdf-delta tidy
 .PHONY: docker-build-controller docker-smoke-controller
 
 fmt:
@@ -25,6 +25,8 @@ vet:
 
 test: manifests
 	$(GO) test ./...
+
+verify: vet test docker-smoke-controller docker-smoke-fuseki-all docker-smoke-rdf-delta
 
 envtest: manifests
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" $(GO) test ./internal/controller -run Envtest -count=1

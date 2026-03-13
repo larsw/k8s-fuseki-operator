@@ -22,6 +22,14 @@ go mod tidy
 make test
 ```
 
+For the broader local verification sweep used before pushing changes, run:
+
+```sh
+make verify
+```
+
+This target runs `go vet`, the full Go test suite, the controller image smoke test, the aggregate Fuseki smoke suite including the Ranger path, and the RDF Delta smoke test.
+
 ## Run The Manager
 
 ```sh
@@ -60,8 +68,10 @@ The repository now includes a checked-in [images/fuseki/versions.mk](../images/f
 
 ```sh
 make docker-build-fuseki
-make docker-smoke-fuseki
+make docker-smoke-fuseki-all
 ```
+
+The aggregate Fuseki smoke target runs both the base Fuseki smoke check and the Ranger-backed authorization smoke check. The Ranger path uses `python3` for the mock Ranger server.
 
 To override the pinned release for testing, pass `JENA_VERSION` and `JENA_SHA512` explicitly on the command line.
 

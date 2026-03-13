@@ -24,6 +24,12 @@ make test
 make run
 ```
 
+Run the main local verification sweep with:
+
+```sh
+make verify
+```
+
 Generate CRDs after API changes with:
 
 ```sh
@@ -90,7 +96,7 @@ The image scaffold is pinned through [images/fuseki/versions.mk](images/fuseki/v
 make docker-build-controller
 make docker-smoke-controller
 make docker-build-fuseki
-make docker-smoke-fuseki
+make docker-smoke-fuseki-all
 ```
 
 See [docs/development.md](docs/development.md) for local setup details, [docs/fusekictl.md](docs/fusekictl.md) for CLI usage, and [docs/release-packaging.md](docs/release-packaging.md) for Helm and OLM packaging workflow notes.
