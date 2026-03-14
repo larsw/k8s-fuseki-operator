@@ -273,6 +273,108 @@ func TestIngestPipelineReconcileCreatesOneShotJobWhenDependenciesResolved(t *tes
 	}
 }
 
+func TestIngestPipelineReconcileSurfacesFailedJobSummary(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add batch scheme: %v", err)
+	}
+
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "example-dataset", Namespace: "default"}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	server := &fusekiv1alpha1.FusekiServer{ObjectMeta: metav1.ObjectMeta{Name: "example-server", Namespace: "default"}, Spec: fusekiv1alpha1.FusekiServerSpec{Image: "ghcr.io/example/fuseki:6.0.0", DatasetRefs: []corev1.LocalObjectReference{{Name: dataset.Name}}}}
+	shaclPolicy := &fusekiv1alpha1.SHACLPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-shacl", Namespace: "default"},
+		Spec: fusekiv1alpha1.SHACLPolicySpec{
+			Sources: []fusekiv1alpha1.SHACLSource{{
+				Type:   fusekiv1alpha1.SHACLSourceTypeInline,
+				Inline: "@prefix sh: <http://www.w3.org/ns/shacl#> .\n[] a sh:NodeShape .",
+			}},
+			FailureAction: fusekiv1alpha1.SHACLFailureActionReportOnly,
+		},
+		Status: fusekiv1alpha1.SHACLPolicyStatus{
+			Conditions: []metav1.Condition{{Type: configuredConditionType, Status: metav1.ConditionTrue, Reason: "SourcesResolved"}},
+		},
+	}
+	pipeline := &fusekiv1alpha1.IngestPipeline{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-pipeline", Namespace: "default"},
+		Spec: fusekiv1alpha1.IngestPipelineSpec{
+			Target:         fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: dataset.Name}},
+			Source:         fusekiv1alpha1.DataSourceSpec{Type: fusekiv1alpha1.DataSourceTypeURL, URI: "https://example.com/data.ttl"},
+			SHACLPolicyRef: &corev1.LocalObjectReference{Name: shaclPolicy.Name},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ingestPipelineJobName(pipeline),
+			Namespace: pipeline.Namespace,
+			Annotations: map[string]string{
+				ingestGenerationAnnotation:      strconv.FormatInt(pipeline.Generation, 10),
+				ingestReportDirectoryAnnotation: ingestReportDirectory,
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.IngestPipeline{}).
+		WithObjects(dataset, server, shaclPolicy, pipeline, job).
+		Build()
+
+	reconciler := &IngestPipelineReconciler{Client: k8sClient, Scheme: scheme}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pipeline)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue for failed ingest pipeline, got %s", result.RequeueAfter)
+	}
+
+	updated := &fusekiv1alpha1.IngestPipeline{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(pipeline), updated); err != nil {
+		t.Fatalf("get updated pipeline: %v", err)
+	}
+	if updated.Status.Phase != "Failed" {
+		t.Fatalf("unexpected phase: %q", updated.Status.Phase)
+	}
+	executionCondition := apimeta.FindStatusCondition(updated.Status.Conditions, ingestCompletedConditionType)
+	if executionCondition == nil || executionCondition.Reason != "IngestFailed" {
+		t.Fatalf("expected IngestFailed execution condition, got %#v", executionCondition)
+	}
+	if !strings.Contains(executionCondition.Message, ingestReportDirectory) {
+		t.Fatalf("expected ingest failure message to mention report directory, got %q", executionCondition.Message)
+	}
+
+	summary := &corev1.ConfigMap{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: pipeline.Namespace, Name: ingestPipelineSummaryConfigMapName(pipeline)}, summary); err != nil {
+		t.Fatalf("get ingest summary configmap: %v", err)
+	}
+	if got := summary.Data["phase"]; got != "Failed" {
+		t.Fatalf("unexpected ingest summary phase: %q", got)
+	}
+	if got := summary.Data["executionReason"]; got != "IngestFailed" {
+		t.Fatalf("unexpected ingest summary execution reason: %q", got)
+	}
+	if got := summary.Data["failureAction"]; got != string(fusekiv1alpha1.SHACLFailureActionReportOnly) {
+		t.Fatalf("unexpected ingest summary failure action: %q", got)
+	}
+	if got := summary.Data["shaclPolicy"]; got != shaclPolicy.Name {
+		t.Fatalf("unexpected ingest summary SHACL policy: %q", got)
+	}
+	if got := summary.Data["reportDirectory"]; got != ingestReportDirectory {
+		t.Fatalf("unexpected ingest summary report directory: %q", got)
+	}
+}
+
 func TestIngestPipelineReconcilePendingWhenSHACLPolicyNotReady(t *testing.T) {
 	t.Helper()
 
@@ -705,6 +807,112 @@ func TestChangeSubscriptionReconcileAdvancesCheckpointWhenDeliveryJobCompletes(t
 	deletedJob := &batchv1.Job{}
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: subscription.Namespace, Name: job.Name}, deletedJob); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected delivery job to be deleted after completion, got err=%v", err)
+	}
+}
+
+func TestChangeSubscriptionReconcileSurfacesFailedDeliverySummary(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add batch scheme: %v", err)
+	}
+
+	server := &fusekiv1alpha1.RDFDeltaServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "delta", Namespace: "default"},
+		Spec:       fusekiv1alpha1.RDFDeltaServerSpec{Image: "ghcr.io/example/rdf-delta:latest"},
+	}
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "example-dataset", Namespace: "default"}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	subscription := &fusekiv1alpha1.ChangeSubscription{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-subscription", Namespace: "default"},
+		Spec: fusekiv1alpha1.ChangeSubscriptionSpec{
+			RDFDeltaServerRef: corev1.LocalObjectReference{Name: server.Name},
+			Target:            &fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: dataset.Name}},
+			Sink:              fusekiv1alpha1.DataSinkSpec{Type: fusekiv1alpha1.DataSinkTypeFilesystem, Path: "/exports/"},
+		},
+		Status: fusekiv1alpha1.ChangeSubscriptionStatus{LastCheckpoint: "5"},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      changeSubscriptionJobName(subscription),
+			Namespace: subscription.Namespace,
+			Annotations: map[string]string{
+				subscriptionGenerationAnnotation:      strconv.FormatInt(subscription.Generation, 10),
+				subscriptionStartCheckpointAnnotation: "6",
+				subscriptionEndCheckpointAnnotation:   "7",
+				subscriptionArtifactRefAnnotation:     "/exports/example-subscription-000000000006-000000000007.rdfpatch",
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.ChangeSubscription{}).
+		WithObjects(server, dataset, subscription, job).
+		Build()
+
+	reconciler := &ChangeSubscriptionReconciler{Client: k8sClient, Scheme: scheme}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(subscription)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter != transferRequestRequeueInterval {
+		t.Fatalf("expected requeue interval %s, got %s", transferRequestRequeueInterval, result.RequeueAfter)
+	}
+
+	updated := &fusekiv1alpha1.ChangeSubscription{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(subscription), updated); err != nil {
+		t.Fatalf("get updated subscription: %v", err)
+	}
+	if updated.Status.Phase != "Failed" {
+		t.Fatalf("unexpected phase: %q", updated.Status.Phase)
+	}
+	if updated.Status.LastCheckpoint != "5" {
+		t.Fatalf("unexpected checkpoint: %q", updated.Status.LastCheckpoint)
+	}
+	deliveryCondition := apimeta.FindStatusCondition(updated.Status.Conditions, subscriptionDeliveredConditionType)
+	if deliveryCondition == nil || deliveryCondition.Reason != "SubscriptionFailed" {
+		t.Fatalf("expected SubscriptionFailed condition, got %#v", deliveryCondition)
+	}
+	if !strings.Contains(deliveryCondition.Message, "/exports/example-subscription-000000000006-000000000007.rdfpatch") {
+		t.Fatalf("expected failed delivery message to mention artifact, got %q", deliveryCondition.Message)
+	}
+
+	summary := &corev1.ConfigMap{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: subscription.Namespace, Name: changeSubscriptionSummaryConfigMapName(subscription)}, summary); err != nil {
+		t.Fatalf("get subscription summary configmap: %v", err)
+	}
+	if got := summary.Data["phase"]; got != "Failed" {
+		t.Fatalf("unexpected subscription summary phase: %q", got)
+	}
+	if got := summary.Data["deliveryReason"]; got != "SubscriptionFailed" {
+		t.Fatalf("unexpected subscription summary delivery reason: %q", got)
+	}
+	if got := summary.Data["artifactRef"]; got != "/exports/example-subscription-000000000006-000000000007.rdfpatch" {
+		t.Fatalf("unexpected subscription summary artifact ref: %q", got)
+	}
+	if got := summary.Data["pendingRange"]; got != "6-7" {
+		t.Fatalf("unexpected subscription summary pending range: %q", got)
+	}
+	if got := summary.Data["lag"]; got != "2" {
+		t.Fatalf("unexpected subscription summary lag: %q", got)
+	}
+	if got := summary.Data["currentVersion"]; got != "7" {
+		t.Fatalf("unexpected subscription summary current version: %q", got)
+	}
+
+	deletedJob := &batchv1.Job{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: subscription.Namespace, Name: job.Name}, deletedJob); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected failed delivery job to be deleted, got err=%v", err)
 	}
 }
 

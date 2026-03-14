@@ -814,7 +814,10 @@ func (r *ChangeSubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.R
 						}
 						return ctrl.Result{RequeueAfter: transferRequestRequeueInterval}, nil
 					}
-					phase, completedCheckpoint, progressStatus, progressReason, progressMessage := subscriptionJobProgress(job, subscription.Name)
+					var completedCheckpoint string
+					var progressStatus metav1.ConditionStatus
+					var progressReason, progressMessage string
+					phase, completedCheckpoint, progressStatus, progressReason, progressMessage = subscriptionJobProgress(job, subscription.Name)
 					deliveryStatus = progressStatus
 					deliveryReason = progressReason
 					deliveryMessage = progressMessage
