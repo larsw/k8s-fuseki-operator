@@ -194,16 +194,16 @@ func subscriptionJobProgress(job *batchv1.Job, subscriptionName string) (string,
 		if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
 			message := condition.Message
 			if message == "" {
-				message = fmt.Sprintf("ChangeSubscription %q failed delivering checkpoints %s-%s.", subscriptionName, startCheckpoint, endCheckpoint)
+				message = fmt.Sprintf("ChangeSubscription %q failed delivering checkpoints %s-%s to %s.", subscriptionName, startCheckpoint, endCheckpoint, artifactRef)
 			}
 			return "Failed", "", metav1.ConditionFalse, "SubscriptionFailed", message
 		}
 	}
 
 	if job.Status.StartTime != nil || job.Status.Active > 0 {
-		return "Running", "", metav1.ConditionFalse, "SubscriptionRunning", fmt.Sprintf("ChangeSubscription %q is delivering checkpoints %s-%s.", subscriptionName, startCheckpoint, endCheckpoint)
+		return "Running", "", metav1.ConditionFalse, "SubscriptionRunning", fmt.Sprintf("ChangeSubscription %q is delivering checkpoints %s-%s to %s.", subscriptionName, startCheckpoint, endCheckpoint, artifactRef)
 	}
-	return "Running", "", metav1.ConditionFalse, "SubscriptionPending", fmt.Sprintf("ChangeSubscription %q is waiting to deliver checkpoints %s-%s.", subscriptionName, startCheckpoint, endCheckpoint)
+	return "Running", "", metav1.ConditionFalse, "SubscriptionPending", fmt.Sprintf("ChangeSubscription %q is waiting to deliver checkpoints %s-%s to %s.", subscriptionName, startCheckpoint, endCheckpoint, artifactRef)
 }
 
 func fetchRDFDeltaLogVersion(ctx context.Context, baseURL, logName string) (int, error) {

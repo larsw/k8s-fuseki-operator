@@ -22,10 +22,13 @@ import (
 const (
 	ingestCompletedConditionType     = "IngestCompleted"
 	ingestGenerationAnnotation       = "fuseki.apache.org/observed-generation"
+	ingestReportDirectoryAnnotation  = "fuseki.apache.org/ingest-report-directory"
 	ingestSuccessfulJobsHistoryLimit = int32(1)
 	ingestFailedJobsHistoryLimit     = int32(3)
 	defaultInlineSHACLSourceFileName = "inline-shapes.ttl"
 )
+
+const ingestReportDirectory = transferWorkspaceMountPath + "/reports"
 
 func ingestPipelineJobName(pipeline *fusekiv1alpha1.IngestPipeline) string {
 	return pipeline.Name + "-ingest"
@@ -135,10 +138,16 @@ func reconcileIngestJob(ctx context.Context, c client.Client, scheme *runtime.Sc
 		return nil, err
 	}
 	job.Labels = transferRequestLabels("ingest", pipeline.Name, target.Dataset.Name, target.Workload)
-	job.Annotations = map[string]string{ingestGenerationAnnotation: strconv.FormatInt(pipeline.Generation, 10)}
+	job.Annotations = map[string]string{
+		ingestGenerationAnnotation:      strconv.FormatInt(pipeline.Generation, 10),
+		ingestReportDirectoryAnnotation: ingestReportDirectory,
+	}
 	job.Spec.BackoffLimit = ptrTo(int32(0))
 	job.Spec.Template.ObjectMeta.Labels = mergeStringMaps(job.Labels, map[string]string{"job-name": job.Name, "batch.kubernetes.io/job-name": job.Name})
-	job.Spec.Template.ObjectMeta.Annotations = map[string]string{ingestGenerationAnnotation: strconv.FormatInt(pipeline.Generation, 10)}
+	job.Spec.Template.ObjectMeta.Annotations = map[string]string{
+		ingestGenerationAnnotation:      strconv.FormatInt(pipeline.Generation, 10),
+		ingestReportDirectoryAnnotation: ingestReportDirectory,
+	}
 	job.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
 	job.Spec.Template.Spec.Containers = []corev1.Container{container}
 	job.Spec.Template.Spec.Volumes = transferJobVolumes(target.SecurityProfile)
@@ -159,16 +168,25 @@ func reconcileIngestCronJob(ctx context.Context, c client.Client, scheme *runtim
 			return containerErr
 		}
 		cronJob.Labels = transferRequestLabels("ingest", pipeline.Name, target.Dataset.Name, target.Workload)
-		cronJob.Annotations = mergeStringMaps(cronJob.Annotations, map[string]string{ingestGenerationAnnotation: strconv.FormatInt(pipeline.Generation, 10)})
+		cronJob.Annotations = mergeStringMaps(cronJob.Annotations, map[string]string{
+			ingestGenerationAnnotation:      strconv.FormatInt(pipeline.Generation, 10),
+			ingestReportDirectoryAnnotation: ingestReportDirectory,
+		})
 		cronJob.Spec.Schedule = pipeline.Spec.Schedule
 		cronJob.Spec.Suspend = ptrTo(pipeline.Spec.Suspend)
 		cronJob.Spec.ConcurrencyPolicy = batchv1.ForbidConcurrent
 		cronJob.Spec.SuccessfulJobsHistoryLimit = ptrTo(ingestSuccessfulJobsHistoryLimit)
 		cronJob.Spec.FailedJobsHistoryLimit = ptrTo(ingestFailedJobsHistoryLimit)
 		cronJob.Spec.JobTemplate.ObjectMeta.Labels = mergeStringMaps(cronJob.Labels, map[string]string{"fuseki.apache.org/component": "ingest-job"})
-		cronJob.Spec.JobTemplate.ObjectMeta.Annotations = map[string]string{ingestGenerationAnnotation: strconv.FormatInt(pipeline.Generation, 10)}
+		cronJob.Spec.JobTemplate.ObjectMeta.Annotations = map[string]string{
+			ingestGenerationAnnotation:      strconv.FormatInt(pipeline.Generation, 10),
+			ingestReportDirectoryAnnotation: ingestReportDirectory,
+		}
 		cronJob.Spec.JobTemplate.Spec.Template.ObjectMeta.Labels = mergeStringMaps(cronJob.Labels, map[string]string{"fuseki.apache.org/component": "ingest-job"})
-		cronJob.Spec.JobTemplate.Spec.Template.ObjectMeta.Annotations = map[string]string{ingestGenerationAnnotation: strconv.FormatInt(pipeline.Generation, 10)}
+		cronJob.Spec.JobTemplate.Spec.Template.ObjectMeta.Annotations = map[string]string{
+			ingestGenerationAnnotation:      strconv.FormatInt(pipeline.Generation, 10),
+			ingestReportDirectoryAnnotation: ingestReportDirectory,
+		}
 		cronJob.Spec.JobTemplate.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
 		cronJob.Spec.JobTemplate.Spec.Template.Spec.Containers = []corev1.Container{container}
 		cronJob.Spec.JobTemplate.Spec.Template.Spec.Volumes = transferJobVolumes(target.SecurityProfile)
@@ -200,14 +218,18 @@ func ingestJobProgress(job *batchv1.Job, jobName string) (string, *metav1.Time, 
 	if job == nil {
 		return "Pending", nil, metav1.ConditionFalse, "IngestPending", "Waiting for ingest job creation."
 	}
+	reportDirectory := job.Annotations[ingestReportDirectoryAnnotation]
+	if reportDirectory == "" {
+		reportDirectory = ingestReportDirectory
+	}
 	for _, condition := range job.Status.Conditions {
 		if condition.Type == batchv1.JobComplete && condition.Status == corev1.ConditionTrue {
-			return "Succeeded", job.Status.CompletionTime, metav1.ConditionTrue, "IngestCompleted", fmt.Sprintf("Ingest job %q completed successfully.", jobName)
+			return "Succeeded", job.Status.CompletionTime, metav1.ConditionTrue, "IngestCompleted", fmt.Sprintf("Ingest job %q completed successfully. SHACL reports were written under %s.", jobName, reportDirectory)
 		}
 		if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
 			message := condition.Message
 			if message == "" {
-				message = fmt.Sprintf("Ingest job %q failed.", jobName)
+				message = fmt.Sprintf("Ingest job %q failed. Inspect SHACL reports under %s.", jobName, reportDirectory)
 			}
 			lastRunTime := job.Status.CompletionTime
 			if lastRunTime == nil && job.Status.StartTime != nil {
@@ -218,9 +240,9 @@ func ingestJobProgress(job *batchv1.Job, jobName string) (string, *metav1.Time, 
 	}
 
 	if job.Status.StartTime != nil {
-		return "Running", job.Status.StartTime, metav1.ConditionFalse, "IngestRunning", fmt.Sprintf("Ingest job %q is running.", jobName)
+		return "Running", job.Status.StartTime, metav1.ConditionFalse, "IngestRunning", fmt.Sprintf("Ingest job %q is running. SHACL reports will be written under %s.", jobName, reportDirectory)
 	}
-	return "Running", nil, metav1.ConditionFalse, "IngestPending", fmt.Sprintf("Ingest job %q is pending.", jobName)
+	return "Running", nil, metav1.ConditionFalse, "IngestPending", fmt.Sprintf("Ingest job %q is pending. SHACL reports will be written under %s.", jobName, reportDirectory)
 }
 
 func ingestCronJobProgress(cronJob *batchv1.CronJob, pipelineName string, suspended bool) (string, *metav1.Time, metav1.ConditionStatus, string, string) {

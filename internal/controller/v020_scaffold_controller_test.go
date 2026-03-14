@@ -248,6 +248,9 @@ func TestIngestPipelineReconcileCreatesOneShotJobWhenDependenciesResolved(t *tes
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: pipeline.Namespace, Name: ingestPipelineJobName(pipeline)}, job); err != nil {
 		t.Fatalf("get ingest job: %v", err)
 	}
+	if got := job.Annotations[ingestReportDirectoryAnnotation]; got != ingestReportDirectory {
+		t.Fatalf("unexpected ingest report directory annotation: %q", got)
+	}
 	container := job.Spec.Template.Spec.Containers[0]
 	if got := envVarValue(container.Env, "FUSEKI_IMPORT_URL"); got != "http://example-server:3030/primary/data" {
 		t.Fatalf("unexpected ingest URL: %q", got)
@@ -257,6 +260,16 @@ func TestIngestPipelineReconcileCreatesOneShotJobWhenDependenciesResolved(t *tes
 	}
 	if !strings.Contains(container.Command[2], "shacl_bin") || !strings.Contains(container.Command[2], "validate --shapes") {
 		t.Fatalf("expected ingest script to invoke SHACL validation, got %q", container.Command[2])
+	}
+	summary := &corev1.ConfigMap{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: pipeline.Namespace, Name: ingestPipelineSummaryConfigMapName(pipeline)}, summary); err != nil {
+		t.Fatalf("get ingest summary configmap: %v", err)
+	}
+	if got := summary.Data["reportDirectory"]; got != ingestReportDirectory {
+		t.Fatalf("unexpected ingest summary report directory: %q", got)
+	}
+	if got := summary.Data["executionReason"]; got != "IngestPending" {
+		t.Fatalf("unexpected ingest summary execution reason: %q", got)
 	}
 }
 
@@ -562,7 +575,7 @@ func TestChangeSubscriptionReconcileCreatesDeliveryJobWhenCheckpointAdvances(t *
 		t.Fatalf("unexpected checkpoint: %q", updated.Status.LastCheckpoint)
 	}
 	deliveryCondition := apimeta.FindStatusCondition(updated.Status.Conditions, subscriptionDeliveredConditionType)
-	if deliveryCondition == nil || deliveryCondition.Reason != "SubscriptionPending" {
+	if deliveryCondition == nil || deliveryCondition.Reason != "SubscriptionLagging" {
 		t.Fatalf("expected pending delivery condition, got %#v", deliveryCondition)
 	}
 
@@ -589,6 +602,19 @@ func TestChangeSubscriptionReconcileCreatesDeliveryJobWhenCheckpointAdvances(t *
 	}
 	if !strings.Contains(container.Command[2], "/patch/${version}") {
 		t.Fatalf("expected subscription script to fetch patch versions, got %q", container.Command[2])
+	}
+	summary := &corev1.ConfigMap{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: subscription.Namespace, Name: changeSubscriptionSummaryConfigMapName(subscription)}, summary); err != nil {
+		t.Fatalf("get subscription summary configmap: %v", err)
+	}
+	if got := summary.Data["artifactRef"]; got != expectedArtifact {
+		t.Fatalf("unexpected subscription summary artifact ref: %q", got)
+	}
+	if got := summary.Data["lag"]; got != "2" {
+		t.Fatalf("unexpected subscription lag: %q", got)
+	}
+	if got := summary.Data["pendingRange"]; got != "6-7" {
+		t.Fatalf("unexpected subscription pending range: %q", got)
 	}
 }
 
@@ -664,6 +690,16 @@ func TestChangeSubscriptionReconcileAdvancesCheckpointWhenDeliveryJobCompletes(t
 	deliveryCondition := apimeta.FindStatusCondition(updated.Status.Conditions, subscriptionDeliveredConditionType)
 	if deliveryCondition == nil || deliveryCondition.Reason != "SubscriptionDelivered" {
 		t.Fatalf("expected delivered condition, got %#v", deliveryCondition)
+	}
+	summary := &corev1.ConfigMap{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: subscription.Namespace, Name: changeSubscriptionSummaryConfigMapName(subscription)}, summary); err != nil {
+		t.Fatalf("get subscription summary configmap: %v", err)
+	}
+	if got := summary.Data["lastCheckpoint"]; got != "7" {
+		t.Fatalf("unexpected subscription summary checkpoint: %q", got)
+	}
+	if got := summary.Data["artifactRef"]; got != "/exports/example-subscription-000000000006-000000000007.rdfpatch" {
+		t.Fatalf("unexpected subscription summary artifact ref: %q", got)
 	}
 
 	deletedJob := &batchv1.Job{}

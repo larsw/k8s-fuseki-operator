@@ -468,7 +468,7 @@ func (r *ExportRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=ingestpipelines,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=ingestpipelines/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=shaclpolicies;datasets;fusekiservers;fusekiclusters;securityprofiles,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets;configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs;cronjobs,verbs=get;list;watch;create;update;patch;delete
 func (r *IngestPipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var pipeline fusekiv1alpha1.IngestPipeline
@@ -488,6 +488,13 @@ func (r *IngestPipelineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	executionMessage := "Waiting for ingest prerequisites."
 	phase := "Pending"
 	var lastRunTime *metav1.Time
+	targetKind := "Job"
+	targetName := ingestPipelineJobName(&pipeline)
+	shaclPolicyName := ""
+	failureAction := ""
+	if pipeline.Spec.SHACLPolicyRef != nil {
+		shaclPolicyName = pipeline.Spec.SHACLPolicyRef.Name
+	}
 
 	if len(specIssues) > 0 {
 		phase = "Invalid"
@@ -505,6 +512,9 @@ func (r *IngestPipelineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			configuredReason = shaclStatus.Reason
 			configuredMessage = shaclStatus.Message
 		} else {
+			if shaclStatus.Policy != nil {
+				failureAction = string(shaclStatus.Policy.DesiredFailureAction())
+			}
 			target, err := resolveTransferTarget(ctx, r.Client, pipeline.Namespace, pipeline.Spec.Target, transferDirectionImport)
 			if err != nil {
 				return ctrl.Result{}, err
@@ -525,6 +535,8 @@ func (r *IngestPipelineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 					configuredReason = secretStatus.Reason
 					configuredMessage = secretStatus.Message
 				} else if pipeline.Spec.Schedule != "" {
+					targetKind = "CronJob"
+					targetName = ingestPipelineCronJobName(&pipeline)
 					cronJob, err := reconcileIngestCronJob(ctx, r.Client, r.Scheme, &pipeline, target, shaclStatus.Policy)
 					if err != nil {
 						return ctrl.Result{}, err
@@ -598,6 +610,9 @@ func (r *IngestPipelineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, err
 		}
 	}
+	if err := reconcileIngestPipelineSummary(ctx, r.Client, r.Scheme, &pipeline, configuredStatus, configuredReason, configuredMessage, executionStatus, executionReason, executionMessage, targetKind, targetName, shaclPolicyName, failureAction, lastRunTime); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if len(specIssues) > 0 || phase == "Succeeded" || phase == "Failed" || phase == "Suspended" {
 		return ctrl.Result{}, nil
@@ -610,6 +625,7 @@ func (r *IngestPipelineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&fusekiv1alpha1.IngestPipeline{}).
 		Watches(&fusekiv1alpha1.SHACLPolicy{}, handler.EnqueueRequestsFromMapFunc(r.requestsForSHACLPolicy)).
+		Owns(&corev1.ConfigMap{}).
 		Owns(&batchv1.Job{}).
 		Owns(&batchv1.CronJob{}).
 		Complete(r)
@@ -685,7 +701,7 @@ func resolveSHACLPolicyDependency(ctx context.Context, c client.Client, namespac
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=changesubscriptions,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=changesubscriptions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=rdfdeltaservers;datasets,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets;configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 func (r *ChangeSubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var subscription fusekiv1alpha1.ChangeSubscription
@@ -703,6 +719,12 @@ func (r *ChangeSubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.R
 	phase := "Ready"
 	lastCheckpoint := subscription.Status.LastCheckpoint
 	checkpoint, checkpointErr := parseSubscriptionCheckpoint(subscription.Status.LastCheckpoint)
+	logName := changeSubscriptionLogName(&subscription)
+	deliveryJobName := changeSubscriptionJobName(&subscription)
+	pendingRange := ""
+	artifactRef := ""
+	var lag *int
+	var currentVersionValue *int
 
 	if len(specIssues) > 0 {
 		phase = "Invalid"
@@ -776,6 +798,16 @@ func (r *ChangeSubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.R
 				jobErr := r.Get(ctx, client.ObjectKey{Namespace: subscription.Namespace, Name: changeSubscriptionJobName(&subscription)}, job)
 				switch {
 				case jobErr == nil:
+					artifactRef = job.Annotations[subscriptionArtifactRefAnnotation]
+					pendingRange = job.Annotations[subscriptionStartCheckpointAnnotation] + "-" + job.Annotations[subscriptionEndCheckpointAnnotation]
+					if endCheckpoint, err := strconv.Atoi(job.Annotations[subscriptionEndCheckpointAnnotation]); err == nil {
+						currentVersionValue = &endCheckpoint
+						lagValue := endCheckpoint - checkpoint
+						if lagValue < 0 {
+							lagValue = 0
+						}
+						lag = &lagValue
+					}
 					if job.Annotations[subscriptionGenerationAnnotation] != strconv.FormatInt(subscription.Generation, 10) {
 						if err := deleteChangeSubscriptionJob(ctx, r.Client, subscription.Namespace, job.Name); err != nil {
 							return ctrl.Result{}, err
@@ -805,6 +837,12 @@ func (r *ChangeSubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.R
 						deliveryMessage = fmt.Sprintf("Unable to query RDF Delta checkpoint for %q: %v", server.Name, err)
 						break
 					}
+					currentVersionValue = &currentVersion
+					lagValue := currentVersion - checkpoint
+					if lagValue < 0 {
+						lagValue = 0
+					}
+					lag = &lagValue
 					if currentVersion <= checkpoint {
 						phase = "Ready"
 						deliveryStatus = metav1.ConditionTrue
@@ -812,17 +850,19 @@ func (r *ChangeSubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.R
 						deliveryMessage = fmt.Sprintf("ChangeSubscription %q is current at checkpoint %d.", subscription.Name, checkpoint)
 						break
 					}
-					job, artifactRef, err := reconcileChangeSubscriptionJob(ctx, r.Client, r.Scheme, &subscription, &server, checkpoint+1, currentVersion)
+					job, reconciledArtifactRef, err := reconcileChangeSubscriptionJob(ctx, r.Client, r.Scheme, &subscription, &server, checkpoint+1, currentVersion)
 					if err != nil {
 						return ctrl.Result{}, err
 					}
 					if job == nil {
 						return ctrl.Result{RequeueAfter: transferRequestRequeueInterval}, nil
 					}
+					artifactRef = reconciledArtifactRef
+					pendingRange = fmt.Sprintf("%d-%d", checkpoint+1, currentVersion)
 					phase = "Running"
 					deliveryStatus = metav1.ConditionFalse
-					deliveryReason = "SubscriptionPending"
-					deliveryMessage = fmt.Sprintf("ChangeSubscription %q is delivering checkpoints %d-%d to %s.", subscription.Name, checkpoint+1, currentVersion, artifactRef)
+					deliveryReason = "SubscriptionLagging"
+					deliveryMessage = fmt.Sprintf("ChangeSubscription %q is %d checkpoint(s) behind and is delivering checkpoints %d-%d to %s.", subscription.Name, lagValue, checkpoint+1, currentVersion, artifactRef)
 				default:
 					return ctrl.Result{}, jobErr
 				}
@@ -855,6 +895,9 @@ func (r *ChangeSubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{}, err
 		}
 	}
+	if err := reconcileChangeSubscriptionSummary(ctx, r.Client, r.Scheme, &subscription, configuredStatus, configuredReason, configuredMessage, deliveryStatus, deliveryReason, deliveryMessage, logName, deliveryJobName, pendingRange, artifactRef, lag, currentVersionValue); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if len(specIssues) > 0 || checkpointErr != nil || phase == "Suspended" {
 		return ctrl.Result{}, nil
@@ -867,6 +910,7 @@ func (r *ChangeSubscriptionReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&fusekiv1alpha1.ChangeSubscription{}).
 		Watches(&fusekiv1alpha1.RDFDeltaServer{}, handler.EnqueueRequestsFromMapFunc(r.requestsForRDFDeltaServer)).
+		Owns(&corev1.ConfigMap{}).
 		Owns(&batchv1.Job{}).
 		Complete(r)
 }
