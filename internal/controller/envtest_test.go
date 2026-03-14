@@ -4,13 +4,16 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -735,9 +738,372 @@ func TestEnvtestFusekiUIGatewayExposureCreatesHTTPRouteWhenCRDPresent(t *testing
 	}
 }
 
+func TestEnvtestChangeSubscriptionResumesFromStoredCheckpointAfterRestart(t *testing.T) {
+	t.Helper()
+
+	ctx := context.Background()
+	_, client, scheme := startEnvtestClient(t)
+
+	previousFetcher := rdfDeltaLogVersionFetcher
+	currentVersion := 0
+	rdfDeltaLogVersionFetcher = func(context.Context, string, string) (int, error) {
+		return currentVersion, nil
+	}
+	t.Cleanup(func() { rdfDeltaLogVersionFetcher = previousFetcher })
+
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "envtest-subscription-resume"}}
+	server := &fusekiv1alpha1.RDFDeltaServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "delta", Namespace: namespace.Name},
+		Spec:       fusekiv1alpha1.RDFDeltaServerSpec{Image: "ghcr.io/example/rdf-delta:latest"},
+	}
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "example-dataset", Namespace: namespace.Name}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	subscription := &fusekiv1alpha1.ChangeSubscription{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-subscription", Namespace: namespace.Name},
+		Spec: fusekiv1alpha1.ChangeSubscriptionSpec{
+			RDFDeltaServerRef: corev1.LocalObjectReference{Name: server.Name},
+			Target:            &fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: dataset.Name}},
+			Sink:              fusekiv1alpha1.DataSinkSpec{Type: fusekiv1alpha1.DataSinkTypeFilesystem, Path: "/exports/"},
+		},
+		Status: fusekiv1alpha1.ChangeSubscriptionStatus{LastCheckpoint: "5"},
+	}
+	for _, obj := range []ctrlclient.Object{namespace, server, dataset, subscription} {
+		if err := client.Create(ctx, obj); err != nil {
+			t.Fatalf("create %T: %v", obj, err)
+		}
+	}
+
+	storedSubscription := persistChangeSubscriptionStatus(t, ctx, client, namespace.Name, subscription.Name, "5")
+	completedStartTime := metav1.Now()
+	completedCompletionTime := metav1.NewTime(completedStartTime.Time.Add(time.Minute))
+	completedJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      changeSubscriptionJobName(subscription),
+			Namespace: namespace.Name,
+			Annotations: map[string]string{
+				subscriptionGenerationAnnotation:      strconv.FormatInt(storedSubscription.Generation, 10),
+				subscriptionStartCheckpointAnnotation: "6",
+				subscriptionEndCheckpointAnnotation:   "7",
+				subscriptionArtifactRefAnnotation:     "/exports/example-subscription-000000000006-000000000007.rdfpatch",
+			},
+		},
+		Spec: batchv1.JobSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: "delivery", Image: "ghcr.io/example/rdf-delta:latest"}},
+				},
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+		},
+	}
+	if err := client.Create(ctx, completedJob); err != nil {
+		t.Fatalf("create %T: %v", completedJob, err)
+	}
+	persistJobStatus(t, ctx, client, namespace.Name, completedJob.Name, batchv1.JobStatus{
+		StartTime:      &completedStartTime,
+		CompletionTime: &completedCompletionTime,
+		Succeeded:      1,
+		Conditions: []batchv1.JobCondition{
+			{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue},
+			{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+		},
+	})
+
+	firstReconciler := &ChangeSubscriptionReconciler{Client: client, Scheme: scheme}
+	result, err := firstReconciler.Reconcile(ctx, reconcileRequest(subscription))
+	if err != nil {
+		t.Fatalf("first reconcile subscription: %v", err)
+	}
+	if result.RequeueAfter != transferRequestRequeueInterval {
+		t.Fatalf("expected requeue interval %s after checkpoint advance, got %s", transferRequestRequeueInterval, result.RequeueAfter)
+	}
+
+	updated := &fusekiv1alpha1.ChangeSubscription{}
+	if err := client.Get(ctx, objectKey(namespace.Name, subscription.Name), updated); err != nil {
+		t.Fatalf("get updated subscription after checkpoint advance: %v", err)
+	}
+	if updated.Status.Phase != "Ready" {
+		t.Fatalf("unexpected phase after checkpoint advance: %q", updated.Status.Phase)
+	}
+	if updated.Status.LastCheckpoint != "7" {
+		t.Fatalf("unexpected checkpoint after checkpoint advance: %q", updated.Status.LastCheckpoint)
+	}
+	deliveryCondition := apimeta.FindStatusCondition(updated.Status.Conditions, subscriptionDeliveredConditionType)
+	if deliveryCondition == nil || deliveryCondition.Reason != "SubscriptionDelivered" {
+		t.Fatalf("expected delivered condition after checkpoint advance, got %#v", deliveryCondition)
+	}
+
+	if err := waitForJobDeletion(ctx, client, namespace.Name, completedJob.Name); err != nil {
+		t.Fatalf("expected completed delivery job to be deleted: %v", err)
+	}
+
+	currentVersion = 9
+	secondReconciler := &ChangeSubscriptionReconciler{Client: client, Scheme: scheme}
+	result, err = secondReconciler.Reconcile(ctx, reconcileRequest(subscription))
+	if err != nil {
+		t.Fatalf("second reconcile subscription: %v", err)
+	}
+	if result.RequeueAfter != transferRequestRequeueInterval {
+		t.Fatalf("expected requeue interval %s after resumed delivery, got %s", transferRequestRequeueInterval, result.RequeueAfter)
+	}
+
+	if err := client.Get(ctx, objectKey(namespace.Name, subscription.Name), updated); err != nil {
+		t.Fatalf("get updated subscription after resumed delivery: %v", err)
+	}
+	if updated.Status.Phase != "Running" {
+		t.Fatalf("unexpected phase after resumed delivery: %q", updated.Status.Phase)
+	}
+	if updated.Status.LastCheckpoint != "7" {
+		t.Fatalf("unexpected checkpoint after resumed delivery: %q", updated.Status.LastCheckpoint)
+	}
+	deliveryCondition = apimeta.FindStatusCondition(updated.Status.Conditions, subscriptionDeliveredConditionType)
+	if deliveryCondition == nil || deliveryCondition.Reason != "SubscriptionLagging" {
+		t.Fatalf("expected lagging condition after resumed delivery, got %#v", deliveryCondition)
+	}
+
+	resumedJob := &batchv1.Job{}
+	if err := client.Get(ctx, objectKey(namespace.Name, changeSubscriptionJobName(subscription)), resumedJob); err != nil {
+		t.Fatalf("get resumed delivery job: %v", err)
+	}
+	container := resumedJob.Spec.Template.Spec.Containers[0]
+	if got := envVarValue(container.Env, "SUBSCRIPTION_START_VERSION"); got != "8" {
+		t.Fatalf("unexpected resumed start version: %q", got)
+	}
+	if got := envVarValue(container.Env, "SUBSCRIPTION_END_VERSION"); got != "9" {
+		t.Fatalf("unexpected resumed end version: %q", got)
+	}
+	summary := &corev1.ConfigMap{}
+	if err := client.Get(ctx, objectKey(namespace.Name, changeSubscriptionSummaryConfigMapName(subscription)), summary); err != nil {
+		t.Fatalf("get resumed subscription summary: %v", err)
+	}
+	if got := summary.Data["lastCheckpoint"]; got != "7" {
+		t.Fatalf("unexpected summary checkpoint after resumed delivery: %q", got)
+	}
+	if got := summary.Data["pendingRange"]; got != "8-9" {
+		t.Fatalf("unexpected summary pending range after resumed delivery: %q", got)
+	}
+	if got := summary.Data["lag"]; got != "2" {
+		t.Fatalf("unexpected summary lag after resumed delivery: %q", got)
+	}
+}
+
+func TestEnvtestChangeSubscriptionRetriesFailedDeliveryAfterRestart(t *testing.T) {
+	t.Helper()
+
+	ctx := context.Background()
+	_, client, scheme := startEnvtestClient(t)
+
+	previousFetcher := rdfDeltaLogVersionFetcher
+	rdfDeltaLogVersionFetcher = func(context.Context, string, string) (int, error) {
+		return 7, nil
+	}
+	t.Cleanup(func() { rdfDeltaLogVersionFetcher = previousFetcher })
+
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "envtest-subscription-retry"}}
+	server := &fusekiv1alpha1.RDFDeltaServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "delta", Namespace: namespace.Name},
+		Spec:       fusekiv1alpha1.RDFDeltaServerSpec{Image: "ghcr.io/example/rdf-delta:latest"},
+	}
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "example-dataset", Namespace: namespace.Name}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	subscription := &fusekiv1alpha1.ChangeSubscription{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-subscription", Namespace: namespace.Name},
+		Spec: fusekiv1alpha1.ChangeSubscriptionSpec{
+			RDFDeltaServerRef: corev1.LocalObjectReference{Name: server.Name},
+			Target:            &fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: dataset.Name}},
+			Sink:              fusekiv1alpha1.DataSinkSpec{Type: fusekiv1alpha1.DataSinkTypeFilesystem, Path: "/exports/"},
+		},
+		Status: fusekiv1alpha1.ChangeSubscriptionStatus{LastCheckpoint: "5"},
+	}
+	for _, obj := range []ctrlclient.Object{namespace, server, dataset, subscription} {
+		if err := client.Create(ctx, obj); err != nil {
+			t.Fatalf("create %T: %v", obj, err)
+		}
+	}
+
+	storedSubscription := persistChangeSubscriptionStatus(t, ctx, client, namespace.Name, subscription.Name, "5")
+	failedStartTime := metav1.Now()
+	failedJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      changeSubscriptionJobName(subscription),
+			Namespace: namespace.Name,
+			Annotations: map[string]string{
+				subscriptionGenerationAnnotation:      strconv.FormatInt(storedSubscription.Generation, 10),
+				subscriptionStartCheckpointAnnotation: "6",
+				subscriptionEndCheckpointAnnotation:   "7",
+				subscriptionArtifactRefAnnotation:     "/exports/example-subscription-000000000006-000000000007.rdfpatch",
+			},
+		},
+		Spec: batchv1.JobSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: "delivery", Image: "ghcr.io/example/rdf-delta:latest"}},
+				},
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}},
+		},
+	}
+	if err := client.Create(ctx, failedJob); err != nil {
+		t.Fatalf("create %T: %v", failedJob, err)
+	}
+	persistJobStatus(t, ctx, client, namespace.Name, failedJob.Name, batchv1.JobStatus{
+		StartTime: &failedStartTime,
+		Failed:    1,
+		Conditions: []batchv1.JobCondition{
+			{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue},
+			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue},
+		},
+	})
+
+	firstReconciler := &ChangeSubscriptionReconciler{Client: client, Scheme: scheme}
+	result, err := firstReconciler.Reconcile(ctx, reconcileRequest(subscription))
+	if err != nil {
+		t.Fatalf("first reconcile subscription: %v", err)
+	}
+	if result.RequeueAfter != transferRequestRequeueInterval {
+		t.Fatalf("expected requeue interval %s after failed delivery, got %s", transferRequestRequeueInterval, result.RequeueAfter)
+	}
+
+	updated := &fusekiv1alpha1.ChangeSubscription{}
+	if err := client.Get(ctx, objectKey(namespace.Name, subscription.Name), updated); err != nil {
+		t.Fatalf("get updated subscription after failed delivery: %v", err)
+	}
+	if updated.Status.Phase != "Failed" {
+		t.Fatalf("unexpected phase after failed delivery: %q", updated.Status.Phase)
+	}
+	if updated.Status.LastCheckpoint != "5" {
+		t.Fatalf("unexpected checkpoint after failed delivery: %q", updated.Status.LastCheckpoint)
+	}
+	deliveryCondition := apimeta.FindStatusCondition(updated.Status.Conditions, subscriptionDeliveredConditionType)
+	if deliveryCondition == nil || deliveryCondition.Reason != "SubscriptionFailed" {
+		t.Fatalf("expected failed condition after failed delivery, got %#v", deliveryCondition)
+	}
+
+	if err := waitForJobDeletion(ctx, client, namespace.Name, failedJob.Name); err != nil {
+		t.Fatalf("expected failed delivery job to be deleted: %v", err)
+	}
+
+	summary := &corev1.ConfigMap{}
+	if err := client.Get(ctx, objectKey(namespace.Name, changeSubscriptionSummaryConfigMapName(subscription)), summary); err != nil {
+		t.Fatalf("get failed delivery summary: %v", err)
+	}
+	if got := summary.Data["deliveryReason"]; got != "SubscriptionFailed" {
+		t.Fatalf("unexpected delivery reason after failed delivery: %q", got)
+	}
+	if got := summary.Data["pendingRange"]; got != "6-7" {
+		t.Fatalf("unexpected pending range after failed delivery: %q", got)
+	}
+
+	secondReconciler := &ChangeSubscriptionReconciler{Client: client, Scheme: scheme}
+	result, err = secondReconciler.Reconcile(ctx, reconcileRequest(subscription))
+	if err != nil {
+		t.Fatalf("second reconcile subscription: %v", err)
+	}
+	if result.RequeueAfter != transferRequestRequeueInterval {
+		t.Fatalf("expected requeue interval %s after retry delivery, got %s", transferRequestRequeueInterval, result.RequeueAfter)
+	}
+
+	if err := client.Get(ctx, objectKey(namespace.Name, subscription.Name), updated); err != nil {
+		t.Fatalf("get updated subscription after retry delivery: %v", err)
+	}
+	if updated.Status.Phase != "Running" {
+		t.Fatalf("unexpected phase after retry delivery: %q", updated.Status.Phase)
+	}
+	if updated.Status.LastCheckpoint != "5" {
+		t.Fatalf("unexpected checkpoint after retry delivery: %q", updated.Status.LastCheckpoint)
+	}
+	deliveryCondition = apimeta.FindStatusCondition(updated.Status.Conditions, subscriptionDeliveredConditionType)
+	if deliveryCondition == nil || deliveryCondition.Reason != "SubscriptionLagging" {
+		t.Fatalf("expected lagging condition after retry delivery, got %#v", deliveryCondition)
+	}
+
+	retriedJob := &batchv1.Job{}
+	if err := client.Get(ctx, objectKey(namespace.Name, changeSubscriptionJobName(subscription)), retriedJob); err != nil {
+		t.Fatalf("get retried delivery job: %v", err)
+	}
+	container := retriedJob.Spec.Template.Spec.Containers[0]
+	if got := envVarValue(container.Env, "SUBSCRIPTION_START_VERSION"); got != "6" {
+		t.Fatalf("unexpected retried start version: %q", got)
+	}
+	if got := envVarValue(container.Env, "SUBSCRIPTION_END_VERSION"); got != "7" {
+		t.Fatalf("unexpected retried end version: %q", got)
+	}
+	if err := client.Get(ctx, objectKey(namespace.Name, changeSubscriptionSummaryConfigMapName(subscription)), summary); err != nil {
+		t.Fatalf("get retried delivery summary: %v", err)
+	}
+	if got := summary.Data["deliveryReason"]; got != "SubscriptionLagging" {
+		t.Fatalf("unexpected delivery reason after retry delivery: %q", got)
+	}
+	if got := summary.Data["pendingRange"]; got != "6-7" {
+		t.Fatalf("unexpected pending range after retry delivery: %q", got)
+	}
+	if got := summary.Data["lag"]; got != "2" {
+		t.Fatalf("unexpected lag after retry delivery: %q", got)
+	}
+}
+
 func startEnvtestClient(t *testing.T) (*envtest.Environment, ctrlclient.Client, *runtime.Scheme) {
 	t.Helper()
 	return startEnvtestClientWithAdditionalCRDPaths(t)
+}
+
+func persistChangeSubscriptionStatus(t *testing.T, ctx context.Context, client ctrlclient.Client, namespace, name, checkpoint string) *fusekiv1alpha1.ChangeSubscription {
+	t.Helper()
+
+	subscription := &fusekiv1alpha1.ChangeSubscription{}
+	if err := client.Get(ctx, objectKey(namespace, name), subscription); err != nil {
+		t.Fatalf("get subscription before status update: %v", err)
+	}
+	subscription.Status.LastCheckpoint = checkpoint
+	if err := client.Status().Update(ctx, subscription); err != nil {
+		t.Fatalf("update subscription status: %v", err)
+	}
+	if err := client.Get(ctx, objectKey(namespace, name), subscription); err != nil {
+		t.Fatalf("get subscription after status update: %v", err)
+	}
+	return subscription
+}
+
+func persistJobStatus(t *testing.T, ctx context.Context, client ctrlclient.Client, namespace, name string, status batchv1.JobStatus) *batchv1.Job {
+	t.Helper()
+
+	job := &batchv1.Job{}
+	if err := client.Get(ctx, objectKey(namespace, name), job); err != nil {
+		t.Fatalf("get job before status update: %v", err)
+	}
+	job.Status = status
+	if err := client.Status().Update(ctx, job); err != nil {
+		t.Fatalf("update job status: %v", err)
+	}
+	if err := client.Get(ctx, objectKey(namespace, name), job); err != nil {
+		t.Fatalf("get job after status update: %v", err)
+	}
+	return job
+}
+
+func waitForJobDeletion(ctx context.Context, client ctrlclient.Client, namespace, name string) error {
+	for range 50 {
+		job := &batchv1.Job{}
+		err := client.Get(ctx, objectKey(namespace, name), job)
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if job.DeletionTimestamp != nil && len(job.Finalizers) > 0 {
+			job.Finalizers = nil
+			if err := client.Update(ctx, job); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return context.DeadlineExceeded
 }
 
 func startEnvtestClientWithAdditionalCRDPaths(t *testing.T, additionalCRDPaths ...string) (*envtest.Environment, ctrlclient.Client, *runtime.Scheme) {

@@ -228,8 +228,8 @@ const (
 	DataSinkTypeFilesystem DataSinkType = "Filesystem"
 )
 
-// +kubebuilder:validation:XValidation:rule="self.type == 'Filesystem' ? size(self.path) > 0 : size(self.uri) > 0",message="filesystem sources require path and URL or S3 sources require uri"
-// +kubebuilder:validation:XValidation:rule="self.type == 'Filesystem' ? size(self.uri) == 0 : size(self.path) == 0",message="filesystem sources cannot set uri and URL or S3 sources cannot set path"
+// +kubebuilder:validation:XValidation:rule="self.type == 'Filesystem' ? (has(self.path) && size(self.path) > 0) : (has(self.uri) && size(self.uri) > 0)",message="filesystem sources require path and URL or S3 sources require uri"
+// +kubebuilder:validation:XValidation:rule="self.type == 'Filesystem' ? (!has(self.uri) || size(self.uri) == 0) : (!has(self.path) || size(self.path) == 0)",message="filesystem sources cannot set uri and URL or S3 sources cannot set path"
 type DataSourceSpec struct {
 	Type DataSourceType `json:"type"`
 
@@ -239,8 +239,8 @@ type DataSourceSpec struct {
 	SecretRef *corev1.LocalObjectReference `json:"secretRef,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="self.type == 'Filesystem' ? size(self.path) > 0 : size(self.uri) > 0",message="filesystem sinks require path and S3 sinks require uri"
-// +kubebuilder:validation:XValidation:rule="self.type == 'Filesystem' ? size(self.uri) == 0 : size(self.path) == 0",message="filesystem sinks cannot set uri and S3 sinks cannot set path"
+// +kubebuilder:validation:XValidation:rule="self.type == 'Filesystem' ? (has(self.path) && size(self.path) > 0) : (has(self.uri) && size(self.uri) > 0)",message="filesystem sinks require path and S3 sinks require uri"
+// +kubebuilder:validation:XValidation:rule="self.type == 'Filesystem' ? (!has(self.uri) || size(self.uri) == 0) : (!has(self.path) || size(self.path) == 0)",message="filesystem sinks cannot set uri and S3 sinks cannot set path"
 type DataSinkSpec struct {
 	Type DataSinkType `json:"type"`
 

@@ -179,7 +179,7 @@ func deleteChangeSubscriptionJob(ctx context.Context, c client.Client, namespace
 		return nil
 	}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
-	return client.IgnoreNotFound(c.Delete(ctx, job))
+	return client.IgnoreNotFound(c.Delete(ctx, job, client.GracePeriodSeconds(0)))
 }
 
 func subscriptionJobProgress(job *batchv1.Job, subscriptionName string) (string, string, metav1.ConditionStatus, string, string) {
