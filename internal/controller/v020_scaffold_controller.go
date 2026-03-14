@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -685,6 +686,7 @@ func resolveSHACLPolicyDependency(ctx context.Context, c client.Client, namespac
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=changesubscriptions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=fuseki.apache.org,resources=rdfdeltaservers;datasets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 func (r *ChangeSubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var subscription fusekiv1alpha1.ChangeSubscription
 	if err := r.Get(ctx, req.NamespacedName, &subscription); err != nil {
@@ -692,24 +694,40 @@ func (r *ChangeSubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	specIssues := validateChangeSubscriptionSpec(&subscription)
-	conditionStatus := metav1.ConditionTrue
-	conditionReason := "DependenciesResolved"
-	conditionMessage := fmt.Sprintf("ChangeSubscription %q is ready.", subscription.Name)
+	configuredStatus := metav1.ConditionTrue
+	configuredReason := "DependenciesResolved"
+	configuredMessage := fmt.Sprintf("ChangeSubscription %q dependencies are resolved.", subscription.Name)
+	deliveryStatus := metav1.ConditionTrue
+	deliveryReason := "SubscriptionCurrent"
+	deliveryMessage := fmt.Sprintf("ChangeSubscription %q is up to date.", subscription.Name)
 	phase := "Ready"
+	lastCheckpoint := subscription.Status.LastCheckpoint
+	checkpoint, checkpointErr := parseSubscriptionCheckpoint(subscription.Status.LastCheckpoint)
 
 	if len(specIssues) > 0 {
 		phase = "Invalid"
-		conditionStatus = metav1.ConditionFalse
-		conditionReason = "InvalidSpec"
-		conditionMessage = joinValidationIssues(specIssues)
+		configuredStatus = metav1.ConditionFalse
+		configuredReason = "InvalidSpec"
+		configuredMessage = joinValidationIssues(specIssues)
+		deliveryStatus = metav1.ConditionFalse
+		deliveryReason = "SubscriptionInvalid"
+		deliveryMessage = "ChangeSubscription has an invalid specification."
+	} else if checkpointErr != nil {
+		phase = "Failed"
+		deliveryStatus = metav1.ConditionFalse
+		deliveryReason = "InvalidCheckpoint"
+		deliveryMessage = checkpointErr.Error()
 	} else {
 		var server fusekiv1alpha1.RDFDeltaServer
 		if err := r.Get(ctx, client.ObjectKey{Namespace: subscription.Namespace, Name: subscription.Spec.RDFDeltaServerRef.Name}, &server); err != nil {
 			if apierrors.IsNotFound(err) {
 				phase = "Pending"
-				conditionStatus = metav1.ConditionFalse
-				conditionReason = "RDFDeltaServerNotFound"
-				conditionMessage = fmt.Sprintf("Waiting for RDFDeltaServer %q.", subscription.Spec.RDFDeltaServerRef.Name)
+				configuredStatus = metav1.ConditionFalse
+				configuredReason = "RDFDeltaServerNotFound"
+				configuredMessage = fmt.Sprintf("Waiting for RDFDeltaServer %q.", subscription.Spec.RDFDeltaServerRef.Name)
+				deliveryStatus = metav1.ConditionFalse
+				deliveryReason = "SubscriptionPending"
+				deliveryMessage = configuredMessage
 			} else {
 				return ctrl.Result{}, err
 			}
@@ -718,29 +736,96 @@ func (r *ChangeSubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.R
 			if err := r.Get(ctx, client.ObjectKey{Namespace: subscription.Namespace, Name: subscription.Spec.Target.DatasetRef.Name}, &dataset); err != nil {
 				if apierrors.IsNotFound(err) {
 					phase = "Pending"
-					conditionStatus = metav1.ConditionFalse
-					conditionReason = "TargetDatasetNotFound"
-					conditionMessage = fmt.Sprintf("Waiting for Dataset %q.", subscription.Spec.Target.DatasetRef.Name)
+					configuredStatus = metav1.ConditionFalse
+					configuredReason = "TargetDatasetNotFound"
+					configuredMessage = fmt.Sprintf("Waiting for Dataset %q.", subscription.Spec.Target.DatasetRef.Name)
+					deliveryStatus = metav1.ConditionFalse
+					deliveryReason = "SubscriptionPending"
+					deliveryMessage = configuredMessage
 				} else {
 					return ctrl.Result{}, err
 				}
 			}
 		}
 
-		if conditionStatus == metav1.ConditionTrue {
+		if configuredStatus == metav1.ConditionTrue {
 			secretStatus, err := resolveTransferSecretDependency(ctx, r.Client, subscription.Namespace, subscription.Spec.Sink.SecretRef, "spec.sink.secretRef", requiredSinkSecretKeys(subscription.Spec.Sink))
 			if err != nil {
 				return ctrl.Result{}, err
 			}
 			if secretStatus.Status != metav1.ConditionTrue {
 				phase = "Pending"
-				conditionStatus = metav1.ConditionFalse
-				conditionReason = secretStatus.Reason
-				conditionMessage = secretStatus.Message
+				configuredStatus = metav1.ConditionFalse
+				configuredReason = secretStatus.Reason
+				configuredMessage = secretStatus.Message
+				deliveryStatus = metav1.ConditionFalse
+				deliveryReason = "SubscriptionPending"
+				deliveryMessage = configuredMessage
 			} else if subscription.Spec.Suspend {
 				phase = "Suspended"
-				conditionReason = "SubscriptionSuspended"
-				conditionMessage = fmt.Sprintf("ChangeSubscription %q is suspended.", subscription.Name)
+				configuredReason = "SubscriptionSuspended"
+				configuredMessage = fmt.Sprintf("ChangeSubscription %q is suspended.", subscription.Name)
+				deliveryStatus = metav1.ConditionFalse
+				deliveryReason = "SubscriptionSuspended"
+				deliveryMessage = configuredMessage
+				if err := deleteChangeSubscriptionJob(ctx, r.Client, subscription.Namespace, changeSubscriptionJobName(&subscription)); err != nil {
+					return ctrl.Result{}, err
+				}
+			} else {
+				job := &batchv1.Job{}
+				jobErr := r.Get(ctx, client.ObjectKey{Namespace: subscription.Namespace, Name: changeSubscriptionJobName(&subscription)}, job)
+				switch {
+				case jobErr == nil:
+					if job.Annotations[subscriptionGenerationAnnotation] != strconv.FormatInt(subscription.Generation, 10) {
+						if err := deleteChangeSubscriptionJob(ctx, r.Client, subscription.Namespace, job.Name); err != nil {
+							return ctrl.Result{}, err
+						}
+						return ctrl.Result{RequeueAfter: transferRequestRequeueInterval}, nil
+					}
+					phase, completedCheckpoint, progressStatus, progressReason, progressMessage := subscriptionJobProgress(job, subscription.Name)
+					deliveryStatus = progressStatus
+					deliveryReason = progressReason
+					deliveryMessage = progressMessage
+					if completedCheckpoint != "" {
+						lastCheckpoint = completedCheckpoint
+						if err := deleteChangeSubscriptionJob(ctx, r.Client, subscription.Namespace, job.Name); err != nil {
+							return ctrl.Result{}, err
+						}
+					} else if phase == "Failed" {
+						if err := deleteChangeSubscriptionJob(ctx, r.Client, subscription.Namespace, job.Name); err != nil {
+							return ctrl.Result{}, err
+						}
+					}
+				case apierrors.IsNotFound(jobErr):
+					currentVersion, err := rdfDeltaLogVersionFetcher(ctx, changeSubscriptionServerURL(&server), changeSubscriptionLogName(&subscription))
+					if err != nil {
+						phase = "Pending"
+						deliveryStatus = metav1.ConditionFalse
+						deliveryReason = "SubscriptionSourceUnreachable"
+						deliveryMessage = fmt.Sprintf("Unable to query RDF Delta checkpoint for %q: %v", server.Name, err)
+						break
+					}
+					if currentVersion <= checkpoint {
+						phase = "Ready"
+						deliveryStatus = metav1.ConditionTrue
+						deliveryReason = "SubscriptionCurrent"
+						deliveryMessage = fmt.Sprintf("ChangeSubscription %q is current at checkpoint %d.", subscription.Name, checkpoint)
+						break
+					}
+					job, artifactRef, err := reconcileChangeSubscriptionJob(ctx, r.Client, r.Scheme, &subscription, &server, checkpoint+1, currentVersion)
+					if err != nil {
+						return ctrl.Result{}, err
+					}
+					if job == nil {
+						return ctrl.Result{RequeueAfter: transferRequestRequeueInterval}, nil
+					}
+					phase = "Running"
+					deliveryStatus = metav1.ConditionFalse
+					deliveryReason = "SubscriptionPending"
+					deliveryMessage = fmt.Sprintf("ChangeSubscription %q is delivering checkpoints %d-%d to %s.", subscription.Name, checkpoint+1, currentVersion, artifactRef)
+				default:
+					return ctrl.Result{}, jobErr
+				}
 			}
 		}
 	}
@@ -748,11 +833,19 @@ func (r *ChangeSubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.R
 	updated := subscription.DeepCopy()
 	updated.Status.ObservedGeneration = subscription.Generation
 	updated.Status.Phase = phase
+	updated.Status.LastCheckpoint = lastCheckpoint
 	apimeta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{
 		Type:               configuredConditionType,
-		Status:             conditionStatus,
-		Reason:             conditionReason,
-		Message:            conditionMessage,
+		Status:             configuredStatus,
+		Reason:             configuredReason,
+		Message:            configuredMessage,
+		ObservedGeneration: subscription.Generation,
+	})
+	apimeta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{
+		Type:               subscriptionDeliveredConditionType,
+		Status:             deliveryStatus,
+		Reason:             deliveryReason,
+		Message:            deliveryMessage,
 		ObservedGeneration: subscription.Generation,
 	})
 
@@ -763,7 +856,7 @@ func (r *ChangeSubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
-	if len(specIssues) > 0 || phase == "Ready" || phase == "Suspended" {
+	if len(specIssues) > 0 || checkpointErr != nil || phase == "Suspended" {
 		return ctrl.Result{}, nil
 	}
 
@@ -774,6 +867,7 @@ func (r *ChangeSubscriptionReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&fusekiv1alpha1.ChangeSubscription{}).
 		Watches(&fusekiv1alpha1.RDFDeltaServer{}, handler.EnqueueRequestsFromMapFunc(r.requestsForRDFDeltaServer)).
+		Owns(&batchv1.Job{}).
 		Complete(r)
 }
 

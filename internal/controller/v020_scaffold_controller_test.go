@@ -2,11 +2,15 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	"strconv"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -490,6 +494,181 @@ func TestChangeSubscriptionReconcileSuspendedWhenDependenciesResolved(t *testing
 	condition := apimeta.FindStatusCondition(updated.Status.Conditions, configuredConditionType)
 	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "SubscriptionSuspended" {
 		t.Fatalf("expected SubscriptionSuspended condition, got %#v", condition)
+	}
+	deliveryCondition := apimeta.FindStatusCondition(updated.Status.Conditions, subscriptionDeliveredConditionType)
+	if deliveryCondition == nil || deliveryCondition.Reason != "SubscriptionSuspended" {
+		t.Fatalf("expected suspended delivery condition, got %#v", deliveryCondition)
+	}
+}
+
+func TestChangeSubscriptionReconcileCreatesDeliveryJobWhenCheckpointAdvances(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add batch scheme: %v", err)
+	}
+
+	previousFetcher := rdfDeltaLogVersionFetcher
+	rdfDeltaLogVersionFetcher = func(context.Context, string, string) (int, error) {
+		return 7, nil
+	}
+	t.Cleanup(func() { rdfDeltaLogVersionFetcher = previousFetcher })
+
+	server := &fusekiv1alpha1.RDFDeltaServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "delta", Namespace: "default"},
+		Spec:       fusekiv1alpha1.RDFDeltaServerSpec{Image: "ghcr.io/example/rdf-delta:latest"},
+	}
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "example-dataset", Namespace: "default"}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	subscription := &fusekiv1alpha1.ChangeSubscription{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-subscription", Namespace: "default"},
+		Spec: fusekiv1alpha1.ChangeSubscriptionSpec{
+			RDFDeltaServerRef: corev1.LocalObjectReference{Name: server.Name},
+			Target:            &fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: dataset.Name}},
+			Sink:              fusekiv1alpha1.DataSinkSpec{Type: fusekiv1alpha1.DataSinkTypeFilesystem, Path: "/exports/"},
+		},
+		Status: fusekiv1alpha1.ChangeSubscriptionStatus{LastCheckpoint: "5"},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.ChangeSubscription{}).
+		WithObjects(server, dataset, subscription).
+		Build()
+
+	reconciler := &ChangeSubscriptionReconciler{Client: k8sClient, Scheme: scheme}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(subscription)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter != transferRequestRequeueInterval {
+		t.Fatalf("expected requeue interval %s, got %s", transferRequestRequeueInterval, result.RequeueAfter)
+	}
+
+	updated := &fusekiv1alpha1.ChangeSubscription{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(subscription), updated); err != nil {
+		t.Fatalf("get updated subscription: %v", err)
+	}
+	if updated.Status.Phase != "Running" {
+		t.Fatalf("unexpected phase: %q", updated.Status.Phase)
+	}
+	if updated.Status.LastCheckpoint != "5" {
+		t.Fatalf("unexpected checkpoint: %q", updated.Status.LastCheckpoint)
+	}
+	deliveryCondition := apimeta.FindStatusCondition(updated.Status.Conditions, subscriptionDeliveredConditionType)
+	if deliveryCondition == nil || deliveryCondition.Reason != "SubscriptionPending" {
+		t.Fatalf("expected pending delivery condition, got %#v", deliveryCondition)
+	}
+
+	job := &batchv1.Job{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: subscription.Namespace, Name: changeSubscriptionJobName(subscription)}, job); err != nil {
+		t.Fatalf("get subscription job: %v", err)
+	}
+	container := job.Spec.Template.Spec.Containers[0]
+	if got := envVarValue(container.Env, "RDF_DELTA_BASE_URL"); got != "http://delta:1066" {
+		t.Fatalf("unexpected RDF Delta URL: %q", got)
+	}
+	if got := envVarValue(container.Env, "RDF_DELTA_LOG_NAME"); got != dataset.Name {
+		t.Fatalf("unexpected log name: %q", got)
+	}
+	if got := envVarValue(container.Env, "SUBSCRIPTION_START_VERSION"); got != "6" {
+		t.Fatalf("unexpected start version: %q", got)
+	}
+	if got := envVarValue(container.Env, "SUBSCRIPTION_END_VERSION"); got != "7" {
+		t.Fatalf("unexpected end version: %q", got)
+	}
+	expectedArtifact := fmt.Sprintf("/exports/%s-%012d-%012d.rdfpatch", subscription.Name, 6, 7)
+	if got := envVarValue(container.Env, "TRANSFER_ARTIFACT_REF"); got != expectedArtifact {
+		t.Fatalf("unexpected artifact ref: %q", got)
+	}
+	if !strings.Contains(container.Command[2], "/patch/${version}") {
+		t.Fatalf("expected subscription script to fetch patch versions, got %q", container.Command[2])
+	}
+}
+
+func TestChangeSubscriptionReconcileAdvancesCheckpointWhenDeliveryJobCompletes(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add batch scheme: %v", err)
+	}
+
+	server := &fusekiv1alpha1.RDFDeltaServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "delta", Namespace: "default"},
+		Spec:       fusekiv1alpha1.RDFDeltaServerSpec{Image: "ghcr.io/example/rdf-delta:latest"},
+	}
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "example-dataset", Namespace: "default"}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	subscription := &fusekiv1alpha1.ChangeSubscription{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-subscription", Namespace: "default"},
+		Spec: fusekiv1alpha1.ChangeSubscriptionSpec{
+			RDFDeltaServerRef: corev1.LocalObjectReference{Name: server.Name},
+			Target:            &fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: dataset.Name}},
+			Sink:              fusekiv1alpha1.DataSinkSpec{Type: fusekiv1alpha1.DataSinkTypeFilesystem, Path: "/exports/"},
+		},
+		Status: fusekiv1alpha1.ChangeSubscriptionStatus{LastCheckpoint: "5"},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      changeSubscriptionJobName(subscription),
+			Namespace: subscription.Namespace,
+			Annotations: map[string]string{
+				subscriptionGenerationAnnotation:      strconv.FormatInt(subscription.Generation, 10),
+				subscriptionStartCheckpointAnnotation: "6",
+				subscriptionEndCheckpointAnnotation:   "7",
+				subscriptionArtifactRefAnnotation:     "/exports/example-subscription-000000000006-000000000007.rdfpatch",
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.ChangeSubscription{}).
+		WithObjects(server, dataset, subscription, job).
+		Build()
+
+	reconciler := &ChangeSubscriptionReconciler{Client: k8sClient, Scheme: scheme}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(subscription)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter != transferRequestRequeueInterval {
+		t.Fatalf("expected requeue interval %s, got %s", transferRequestRequeueInterval, result.RequeueAfter)
+	}
+
+	updated := &fusekiv1alpha1.ChangeSubscription{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(subscription), updated); err != nil {
+		t.Fatalf("get updated subscription: %v", err)
+	}
+	if updated.Status.Phase != "Ready" {
+		t.Fatalf("unexpected phase: %q", updated.Status.Phase)
+	}
+	if updated.Status.LastCheckpoint != "7" {
+		t.Fatalf("unexpected checkpoint: %q", updated.Status.LastCheckpoint)
+	}
+	deliveryCondition := apimeta.FindStatusCondition(updated.Status.Conditions, subscriptionDeliveredConditionType)
+	if deliveryCondition == nil || deliveryCondition.Reason != "SubscriptionDelivered" {
+		t.Fatalf("expected delivered condition, got %#v", deliveryCondition)
+	}
+
+	deletedJob := &batchv1.Job{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: subscription.Namespace, Name: job.Name}, deletedJob); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected delivery job to be deleted after completion, got err=%v", err)
 	}
 }
 
