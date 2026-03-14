@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -115,6 +116,380 @@ func TestIngestPipelineReconcileInvalidSpec(t *testing.T) {
 	}
 	if !strings.Contains(condition.Message, "spec.target.datasetRef.name is required") || !strings.Contains(condition.Message, "spec.shaclPolicyRef.name is required") {
 		t.Fatalf("unexpected condition message: %q", condition.Message)
+	}
+}
+
+func TestSHACLPolicyReconcilePendingWhenConfigMapSourceMissing(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+
+	policy := &fusekiv1alpha1.SHACLPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-shacl", Namespace: "default"},
+		Spec: fusekiv1alpha1.SHACLPolicySpec{
+			Sources: []fusekiv1alpha1.SHACLSource{{
+				Type:         fusekiv1alpha1.SHACLSourceTypeConfigMap,
+				ConfigMapRef: &corev1.LocalObjectReference{Name: "missing-shapes"},
+				Key:          "shapes.ttl",
+			}},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.SHACLPolicy{}).
+		WithObjects(policy).
+		Build()
+
+	reconciler := &SHACLPolicyReconciler{Client: k8sClient, Scheme: scheme}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(policy)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatalf("expected requeue for missing configmap source")
+	}
+
+	updated := &fusekiv1alpha1.SHACLPolicy{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(policy), updated); err != nil {
+		t.Fatalf("get updated policy: %v", err)
+	}
+	if updated.Status.Phase != "Pending" {
+		t.Fatalf("unexpected phase: %q", updated.Status.Phase)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, configuredConditionType)
+	if condition == nil || condition.Reason != "SourcesMissing" {
+		t.Fatalf("expected SourcesMissing condition, got %#v", condition)
+	}
+	if !strings.Contains(condition.Message, "missing-shapes") {
+		t.Fatalf("unexpected condition message: %q", condition.Message)
+	}
+}
+
+func TestIngestPipelineReconcileCreatesOneShotJobWhenDependenciesResolved(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add batch scheme: %v", err)
+	}
+
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "example-dataset", Namespace: "default"}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	server := &fusekiv1alpha1.FusekiServer{ObjectMeta: metav1.ObjectMeta{Name: "example-server", Namespace: "default"}, Spec: fusekiv1alpha1.FusekiServerSpec{Image: "ghcr.io/example/fuseki:6.0.0", DatasetRefs: []corev1.LocalObjectReference{{Name: dataset.Name}}}}
+	shaclPolicy := &fusekiv1alpha1.SHACLPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-shacl", Namespace: "default"},
+		Spec: fusekiv1alpha1.SHACLPolicySpec{
+			Sources: []fusekiv1alpha1.SHACLSource{{
+				Type:   fusekiv1alpha1.SHACLSourceTypeInline,
+				Inline: "@prefix sh: <http://www.w3.org/ns/shacl#> .\n[] a sh:NodeShape .",
+			}},
+		},
+		Status: fusekiv1alpha1.SHACLPolicyStatus{
+			Conditions: []metav1.Condition{{Type: configuredConditionType, Status: metav1.ConditionTrue, Reason: "SourcesResolved"}},
+		},
+	}
+	pipeline := &fusekiv1alpha1.IngestPipeline{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-pipeline", Namespace: "default"},
+		Spec: fusekiv1alpha1.IngestPipelineSpec{
+			Target:         fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: dataset.Name}},
+			Source:         fusekiv1alpha1.DataSourceSpec{Type: fusekiv1alpha1.DataSourceTypeURL, URI: "https://example.com/data.ttl"},
+			SHACLPolicyRef: &corev1.LocalObjectReference{Name: shaclPolicy.Name},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.IngestPipeline{}).
+		WithObjects(dataset, server, shaclPolicy, pipeline).
+		Build()
+
+	reconciler := &IngestPipelineReconciler{Client: k8sClient, Scheme: scheme}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pipeline)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter != transferRequestRequeueInterval {
+		t.Fatalf("expected requeue interval %s for active ingest pipeline, got %s", transferRequestRequeueInterval, result.RequeueAfter)
+	}
+
+	updated := &fusekiv1alpha1.IngestPipeline{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(pipeline), updated); err != nil {
+		t.Fatalf("get updated pipeline: %v", err)
+	}
+	if updated.Status.Phase != "Running" {
+		t.Fatalf("unexpected phase: %q", updated.Status.Phase)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, configuredConditionType)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "PipelineJobReady" {
+		t.Fatalf("expected DependenciesResolved condition, got %#v", condition)
+	}
+	executionCondition := apimeta.FindStatusCondition(updated.Status.Conditions, ingestCompletedConditionType)
+	if executionCondition == nil || executionCondition.Reason != "IngestPending" {
+		t.Fatalf("expected IngestPending execution condition, got %#v", executionCondition)
+	}
+
+	job := &batchv1.Job{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: pipeline.Namespace, Name: ingestPipelineJobName(pipeline)}, job); err != nil {
+		t.Fatalf("get ingest job: %v", err)
+	}
+	container := job.Spec.Template.Spec.Containers[0]
+	if got := envVarValue(container.Env, "FUSEKI_IMPORT_URL"); got != "http://example-server:3030/primary/data" {
+		t.Fatalf("unexpected ingest URL: %q", got)
+	}
+	if got := envVarValue(container.Env, "SHACL_SOURCE_COUNT"); got != "1" {
+		t.Fatalf("unexpected SHACL source count: %q", got)
+	}
+	if !strings.Contains(container.Command[2], "shacl_bin") || !strings.Contains(container.Command[2], "validate --shapes") {
+		t.Fatalf("expected ingest script to invoke SHACL validation, got %q", container.Command[2])
+	}
+}
+
+func TestIngestPipelineReconcilePendingWhenSHACLPolicyNotReady(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add batch scheme: %v", err)
+	}
+
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "example-dataset", Namespace: "default"}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	server := &fusekiv1alpha1.FusekiServer{ObjectMeta: metav1.ObjectMeta{Name: "example-server", Namespace: "default"}, Spec: fusekiv1alpha1.FusekiServerSpec{Image: "ghcr.io/example/fuseki:6.0.0", DatasetRefs: []corev1.LocalObjectReference{{Name: dataset.Name}}}}
+	shaclPolicy := &fusekiv1alpha1.SHACLPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-shacl", Namespace: "default"},
+		Status: fusekiv1alpha1.SHACLPolicyStatus{
+			Conditions: []metav1.Condition{{Type: configuredConditionType, Status: metav1.ConditionFalse, Reason: "SourcesMissing", Message: "Waiting for SHACL sources."}},
+		},
+	}
+	pipeline := &fusekiv1alpha1.IngestPipeline{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-pipeline", Namespace: "default"},
+		Spec: fusekiv1alpha1.IngestPipelineSpec{
+			Target:         fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: dataset.Name}},
+			Source:         fusekiv1alpha1.DataSourceSpec{Type: fusekiv1alpha1.DataSourceTypeURL, URI: "https://example.com/data.ttl"},
+			SHACLPolicyRef: &corev1.LocalObjectReference{Name: shaclPolicy.Name},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.IngestPipeline{}).
+		WithObjects(dataset, server, shaclPolicy, pipeline).
+		Build()
+
+	reconciler := &IngestPipelineReconciler{Client: k8sClient, Scheme: scheme}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pipeline)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatalf("expected requeue for unresolved SHACL policy")
+	}
+
+	updated := &fusekiv1alpha1.IngestPipeline{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(pipeline), updated); err != nil {
+		t.Fatalf("get updated pipeline: %v", err)
+	}
+	if updated.Status.Phase != "Pending" {
+		t.Fatalf("unexpected phase: %q", updated.Status.Phase)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, configuredConditionType)
+	if condition == nil || condition.Reason != "SHACLPolicyNotReady" {
+		t.Fatalf("expected SHACLPolicyNotReady condition, got %#v", condition)
+	}
+}
+
+func TestIngestPipelineReconcileCreatesCronJobWhenScheduled(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add batch scheme: %v", err)
+	}
+
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "example-dataset", Namespace: "default"}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	server := &fusekiv1alpha1.FusekiServer{ObjectMeta: metav1.ObjectMeta{Name: "example-server", Namespace: "default"}, Spec: fusekiv1alpha1.FusekiServerSpec{Image: "ghcr.io/example/fuseki:6.0.0", DatasetRefs: []corev1.LocalObjectReference{{Name: dataset.Name}}}}
+	shaclPolicy := &fusekiv1alpha1.SHACLPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-shacl", Namespace: "default"},
+		Spec: fusekiv1alpha1.SHACLPolicySpec{
+			Sources: []fusekiv1alpha1.SHACLSource{{
+				Type:   fusekiv1alpha1.SHACLSourceTypeInline,
+				Inline: "@prefix sh: <http://www.w3.org/ns/shacl#> .\n[] a sh:NodeShape .",
+			}},
+		},
+		Status: fusekiv1alpha1.SHACLPolicyStatus{
+			Conditions: []metav1.Condition{{Type: configuredConditionType, Status: metav1.ConditionTrue, Reason: "SourcesResolved"}},
+		},
+	}
+	pipeline := &fusekiv1alpha1.IngestPipeline{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-pipeline", Namespace: "default"},
+		Spec: fusekiv1alpha1.IngestPipelineSpec{
+			Target:         fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: dataset.Name}},
+			Source:         fusekiv1alpha1.DataSourceSpec{Type: fusekiv1alpha1.DataSourceTypeURL, URI: "https://example.com/data.ttl"},
+			SHACLPolicyRef: &corev1.LocalObjectReference{Name: shaclPolicy.Name},
+			Schedule:       "*/15 * * * *",
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.IngestPipeline{}).
+		WithObjects(dataset, server, shaclPolicy, pipeline).
+		Build()
+
+	reconciler := &IngestPipelineReconciler{Client: k8sClient, Scheme: scheme}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pipeline)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatalf("expected requeue for scheduled pipeline status refresh")
+	}
+
+	updated := &fusekiv1alpha1.IngestPipeline{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(pipeline), updated); err != nil {
+		t.Fatalf("get updated pipeline: %v", err)
+	}
+	if updated.Status.Phase != "Running" {
+		t.Fatalf("unexpected phase: %q", updated.Status.Phase)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, configuredConditionType)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "PipelineScheduled" {
+		t.Fatalf("expected PipelineScheduled condition, got %#v", condition)
+	}
+	executionCondition := apimeta.FindStatusCondition(updated.Status.Conditions, ingestCompletedConditionType)
+	if executionCondition == nil || executionCondition.Reason != "IngestScheduled" {
+		t.Fatalf("expected IngestScheduled execution condition, got %#v", executionCondition)
+	}
+
+	cronJob := &batchv1.CronJob{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: pipeline.Namespace, Name: ingestPipelineCronJobName(pipeline)}, cronJob); err != nil {
+		t.Fatalf("get ingest cronjob: %v", err)
+	}
+	if cronJob.Spec.Schedule != pipeline.Spec.Schedule {
+		t.Fatalf("unexpected ingest cronjob schedule: %q", cronJob.Spec.Schedule)
+	}
+	if cronJob.Spec.Suspend == nil || *cronJob.Spec.Suspend {
+		t.Fatalf("expected ingest cronjob to be active, got %#v", cronJob.Spec.Suspend)
+	}
+}
+
+func TestIngestPipelineReconcileInvalidWhenScheduleMalformed(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+
+	pipeline := &fusekiv1alpha1.IngestPipeline{
+		ObjectMeta: metav1.ObjectMeta{Name: "invalid-schedule", Namespace: "default"},
+		Spec: fusekiv1alpha1.IngestPipelineSpec{
+			Target:         fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: "example-dataset"}},
+			Source:         fusekiv1alpha1.DataSourceSpec{Type: fusekiv1alpha1.DataSourceTypeURL, URI: "https://example.com/data.ttl"},
+			SHACLPolicyRef: &corev1.LocalObjectReference{Name: "example-shacl"},
+			Schedule:       "not-a-cron",
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.IngestPipeline{}).
+		WithObjects(pipeline).
+		Build()
+
+	reconciler := &IngestPipelineReconciler{Client: k8sClient, Scheme: scheme}
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pipeline)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	updated := &fusekiv1alpha1.IngestPipeline{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(pipeline), updated); err != nil {
+		t.Fatalf("get updated pipeline: %v", err)
+	}
+	if updated.Status.Phase != "Invalid" {
+		t.Fatalf("unexpected phase: %q", updated.Status.Phase)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, configuredConditionType)
+	if condition == nil || condition.Reason != "InvalidSpec" || !strings.Contains(condition.Message, "spec.schedule must be a valid standard cron expression") {
+		t.Fatalf("expected invalid schedule condition, got %#v", condition)
+	}
+}
+
+func TestChangeSubscriptionReconcileSuspendedWhenDependenciesResolved(t *testing.T) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := fusekiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add fuseki scheme: %v", err)
+	}
+
+	server := &fusekiv1alpha1.RDFDeltaServer{ObjectMeta: metav1.ObjectMeta{Name: "delta", Namespace: "default"}}
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "example-dataset", Namespace: "default"}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	subscription := &fusekiv1alpha1.ChangeSubscription{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-subscription", Namespace: "default"},
+		Spec: fusekiv1alpha1.ChangeSubscriptionSpec{
+			RDFDeltaServerRef: corev1.LocalObjectReference{Name: server.Name},
+			Target:            &fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: dataset.Name}},
+			Sink:              fusekiv1alpha1.DataSinkSpec{Type: fusekiv1alpha1.DataSinkTypeFilesystem, Path: "/exports/subscription.nq"},
+			Suspend:           true,
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&fusekiv1alpha1.ChangeSubscription{}).
+		WithObjects(server, dataset, subscription).
+		Build()
+
+	reconciler := &ChangeSubscriptionReconciler{Client: k8sClient, Scheme: scheme}
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(subscription)})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue for suspended subscription, got %s", result.RequeueAfter)
+	}
+
+	updated := &fusekiv1alpha1.ChangeSubscription{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(subscription), updated); err != nil {
+		t.Fatalf("get updated subscription: %v", err)
+	}
+	if updated.Status.Phase != "Suspended" {
+		t.Fatalf("unexpected phase: %q", updated.Status.Phase)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, configuredConditionType)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "SubscriptionSuspended" {
+		t.Fatalf("expected SubscriptionSuspended condition, got %#v", condition)
 	}
 }
 

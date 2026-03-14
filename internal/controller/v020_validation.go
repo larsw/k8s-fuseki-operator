@@ -1,8 +1,11 @@
 package controller
 
 import (
+	"path/filepath"
 	"strconv"
 	"strings"
+
+	cron "github.com/robfig/cron/v3"
 
 	fusekiv1alpha1 "github.com/larsw/k8s-fuseki-operator/api/v1alpha1"
 )
@@ -134,6 +137,11 @@ func validateIngestPipelineSpec(pipeline *fusekiv1alpha1.IngestPipeline) []strin
 	if pipeline.Spec.SHACLPolicyRef == nil || pipeline.Spec.SHACLPolicyRef.Name == "" {
 		issues = append(issues, "spec.shaclPolicyRef.name is required")
 	}
+	if pipeline.Spec.Schedule != "" {
+		if _, err := cron.ParseStandard(pipeline.Spec.Schedule); err != nil {
+			issues = append(issues, "spec.schedule must be a valid standard cron expression")
+		}
+	}
 	return issues
 }
 
@@ -167,8 +175,32 @@ func validateDataSourceSpec(prefix string, source fusekiv1alpha1.DataSourceSpec)
 		if source.Path == "" {
 			issues = append(issues, prefix+".path is required for Filesystem sources")
 		}
+		if source.Path != "" && !filepath.IsAbs(source.Path) {
+			issues = append(issues, prefix+".path must be absolute for Filesystem sources")
+		}
 		if source.URI != "" {
 			issues = append(issues, prefix+".uri must be empty for Filesystem sources")
+		}
+	case fusekiv1alpha1.DataSourceTypeURL:
+		if source.URI == "" {
+			issues = append(issues, prefix+".uri is required for URL sources")
+		} else if !strings.HasPrefix(source.URI, "http://") && !strings.HasPrefix(source.URI, "https://") {
+			issues = append(issues, prefix+".uri must use http:// or https:// for URL sources")
+		}
+		if source.Path != "" {
+			issues = append(issues, prefix+".path must be empty for URL sources")
+		}
+	case fusekiv1alpha1.DataSourceTypeS3:
+		if source.URI == "" {
+			issues = append(issues, prefix+".uri is required for S3 sources")
+		} else if !strings.HasPrefix(source.URI, "s3://") {
+			issues = append(issues, prefix+".uri must use s3:// for S3 sources")
+		}
+		if source.Path != "" {
+			issues = append(issues, prefix+".path must be empty for S3 sources")
+		}
+		if source.SecretRef == nil || source.SecretRef.Name == "" {
+			issues = append(issues, prefix+".secretRef.name is required for S3 sources")
 		}
 	default:
 		if source.URI == "" {
@@ -188,8 +220,23 @@ func validateDataSinkSpec(prefix string, sink fusekiv1alpha1.DataSinkSpec) []str
 		if sink.Path == "" {
 			issues = append(issues, prefix+".path is required for Filesystem sinks")
 		}
+		if sink.Path != "" && !filepath.IsAbs(sink.Path) {
+			issues = append(issues, prefix+".path must be absolute for Filesystem sinks")
+		}
 		if sink.URI != "" {
 			issues = append(issues, prefix+".uri must be empty for Filesystem sinks")
+		}
+	case fusekiv1alpha1.DataSinkTypeS3:
+		if sink.URI == "" {
+			issues = append(issues, prefix+".uri is required for S3 sinks")
+		} else if !strings.HasPrefix(sink.URI, "s3://") {
+			issues = append(issues, prefix+".uri must use s3:// for S3 sinks")
+		}
+		if sink.Path != "" {
+			issues = append(issues, prefix+".path must be empty for S3 sinks")
+		}
+		if sink.SecretRef == nil || sink.SecretRef.Name == "" {
+			issues = append(issues, prefix+".secretRef.name is required for S3 sinks")
 		}
 	default:
 		if sink.URI == "" {
