@@ -71,7 +71,29 @@ make docker-build-fuseki
 make docker-smoke-fuseki-all
 ```
 
-The aggregate Fuseki smoke target runs both the base Fuseki smoke check and the Ranger-backed authorization smoke check. The Ranger path uses `python3` for the mock Ranger server.
+The aggregate Fuseki smoke target runs both the base Fuseki smoke check and the Ranger-backed authorization smoke check. The Ranger path now talks to a live Apache Ranger admin and bootstraps smoke-specific Ranger objects before it starts Fuseki.
+
+To start a local Ranger stack that matches CI, use:
+
+```sh
+bash ./hack/smoke/ranger-stack.sh up
+```
+
+The helper uses the upstream Ranger images' expected internal hostnames on the `rangernw` Docker network. If you already have a local `ranger-admin` stack running, use that existing stack directly instead of starting a second one with the helper.
+
+Then run:
+
+```sh
+make docker-smoke-fuseki-ranger
+```
+
+The Ranger smoke flow expects a live Ranger admin reachable at `http://127.0.0.1:16080/service` with `admin` and `rangerR0cks!` by default. It bootstraps a smoke-specific Fuseki service definition, a `fuseki-smoke` service, test users, a test group, a test role, and the policies needed for the existing allow and deny checks. Override `RANGER_ADMIN_URL`, `RANGER_USERNAME`, `RANGER_PASSWORD`, `RANGER_SERVICE_NAME`, `RANGER_SERVICE_DEF_NAME`, or `RANGER_ADMIN_CONTAINER_URL` when your local stack differs.
+
+When you are done with the local Ranger stack, stop it with:
+
+```sh
+bash ./hack/smoke/ranger-stack.sh down
+```
 
 To override the pinned release for testing, pass `JENA_VERSION` and `JENA_SHA512` explicitly on the command line.
 

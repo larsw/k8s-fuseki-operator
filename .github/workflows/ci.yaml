@@ -51,10 +51,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Smoke test Fuseki image paths
-        run: make docker-smoke-fuseki-all
+      - name: Smoke test Fuseki base image path
+        run: make docker-smoke-fuseki
       - name: Smoke test RDF Delta image scaffold
         run: make docker-smoke-rdf-delta
+
+  fuseki-ranger-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start Ranger stack
+        run: bash ./hack/smoke/ranger-stack.sh up
+      - name: Smoke test Fuseki Ranger integration path
+        run: make docker-smoke-fuseki-ranger
+      - name: Show Ranger stack logs on failure
+        if: failure()
+        run: bash ./hack/smoke/ranger-stack.sh logs
+      - name: Stop Ranger stack
+        if: always()
+        run: bash ./hack/smoke/ranger-stack.sh down
 
   controller-image:
     runs-on: ubuntu-latest
