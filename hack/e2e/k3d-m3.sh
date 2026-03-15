@@ -25,6 +25,11 @@ print_section() {
 	"$@" >&2 || true
 }
 
+log_step() {
+	echo >&2
+	echo "--> $*" >&2
+}
+
 cluster_context_exists() {
 	kubectl config get-contexts "${KUBECTL_CONTEXT}" >/dev/null 2>&1
 }
@@ -144,17 +149,22 @@ require_tool curl
 
 cd "${ROOT_DIR}"
 
-make generate manifests
+log_step "Building local Fuseki and RDF Delta images"
 make docker-build-fuseki FUSEKI_IMAGE="${FUSEKI_IMAGE}"
 make docker-build-rdf-delta RDF_DELTA_IMAGE="${RDF_DELTA_IMAGE}"
 
+log_step "Creating k3d cluster ${CLUSTER_NAME}"
 k3d cluster delete "${CLUSTER_NAME}" >/dev/null 2>&1 || true
 k3d cluster create "${CLUSTER_NAME}" --wait
 k3d image import -c "${CLUSTER_NAME}" "${FUSEKI_IMAGE}" "${RDF_DELTA_IMAGE}"
 
 kubectl config use-context "${KUBECTL_CONTEXT}" >/dev/null
-kubectl apply -f config/crd/bases
+log_step "Applying checked-in CRDs"
+for crd in config/crd/bases/fuseki.apache.org_*.yaml; do
+	kubectl apply -f "${crd}"
+done
 
+log_step "Starting local manager"
 go run ./cmd/manager --metrics-bind-address="${METRICS_BIND_ADDRESS}" --health-probe-bind-address="${PROBE_BIND_ADDRESS}" >"${MANAGER_LOG}" 2>&1 &
 MANAGER_PID=$!
 wait_for_manager
@@ -229,12 +239,17 @@ spec:
     size: 1Gi
 EOF
 
+log_step "Applying M3 cluster scenario resources"
 kubectl apply -f "${TMP_DIR}/scenario.yaml"
 
+log_step "Waiting for RDF Delta rollout"
 kubectl rollout status statefulset/example-delta -n "${NAMESPACE}" --timeout=180s
+log_step "Waiting for Fuseki cluster rollout"
 kubectl rollout status statefulset/example -n "${NAMESPACE}" --timeout=240s
+log_step "Waiting for dataset bootstrap job"
 kubectl wait --for=condition=complete job/cluster-example-example-dataset-bootstrap -n "${NAMESPACE}" --timeout=180s
 
+log_step "Validating write lease and read/write service endpoints"
 lease_holder="$(kubectl get lease example-write -n "${NAMESPACE}" -o jsonpath='{.spec.holderIdentity}')"
 if [[ -z "${lease_holder}" ]]; then
 	echo "write lease holder was not selected" >&2
@@ -255,10 +270,12 @@ fi
 
 write_local_port="$(select_local_port)"
 
+log_step "Port-forwarding the write lease holder and probing Fuseki"
 kubectl port-forward -n "${NAMESPACE}" "pod/${lease_holder}" "${write_local_port}:3030" >"${PORT_FORWARD_LOG}" 2>&1 &
 PORT_FORWARD_PID=$!
 wait_for_http "http://127.0.0.1:${write_local_port}/$/ping"
 
+log_step "Creating and verifying datasets through the write service"
 curl --silent --show-error --fail \
 	-u "admin:${ADMIN_PASSWORD}" \
 	-H 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8' \

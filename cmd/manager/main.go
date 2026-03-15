@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"os"
+	"path/filepath"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -19,11 +20,25 @@ import (
 
 var scheme = runtimeScheme()
 
+const defaultWebhookCertDir = "/tmp/k8s-webhook-server/serving-certs"
+
 func runtimeScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(s))
 	utilruntime.Must(fusekiv1alpha1.AddToScheme(s))
 	return s
+}
+
+func webhookServingCertsPresent(certDir string) bool {
+	if certDir == "" {
+		return false
+	}
+	for _, fileName := range []string{"tls.crt", "tls.key"} {
+		if _, err := os.Stat(filepath.Join(certDir, fileName)); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func main() {
@@ -64,9 +79,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := fusekicontroller.SetupV020Webhooks(mgr); err != nil {
-		ctrl.Log.WithName("setup").Error(err, "unable to create validating webhooks")
-		os.Exit(1)
+	if webhookServingCertsPresent(defaultWebhookCertDir) {
+		if err := fusekicontroller.SetupV020Webhooks(mgr); err != nil {
+			ctrl.Log.WithName("setup").Error(err, "unable to create validating webhooks")
+			os.Exit(1)
+		}
+	} else {
+		ctrl.Log.WithName("setup").Info("webhook serving certs not found; skipping validating webhooks", "certDir", defaultWebhookCertDir)
 	}
 
 	if err := (&fusekicontroller.FusekiClusterReconciler{

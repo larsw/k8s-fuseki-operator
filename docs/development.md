@@ -97,9 +97,11 @@ bash ./hack/smoke/ranger-stack.sh down
 
 To override the pinned release for testing, pass `JENA_VERSION` and `JENA_SHA512` explicitly on the command line.
 
-## Run The First k3d M3 Scenario
+## Run The k3d M3 Scenarios
 
-The repository now includes a first k3d-backed M3 scenario that runs the manager locally against a disposable k3d cluster, builds the local Fuseki image, builds the in-repo RDF Delta image for the test harness, applies CRDs and example resources, and verifies:
+The repository now includes two k3d-backed M3 scenarios.
+
+The first scenario runs the manager locally against a disposable k3d cluster, builds the local Fuseki image, builds the in-repo RDF Delta image for the test harness, applies CRDs and example resources, and verifies:
 
 - RDF Delta and Fuseki workloads become ready
 - the write lease selects a single pod
@@ -113,10 +115,24 @@ Run it with:
 make e2e-k3d-m3
 ```
 
+The recovery scenario focuses on the continuous-ingest controller. It runs a standalone FusekiServer with admin auth, creates a failing one-shot IngestPipeline, restarts the manager after updating that pipeline into scheduled mode, and verifies:
+
+- the failed one-shot Job is not replayed after restart
+- the pipeline recovers into a CronJob-backed scheduled state
+- the retained ingest summary ConfigMap reflects the CronJob target and schedule
+- the first scheduled ingest run imports data successfully into Fuseki
+
+Run it with:
+
+```sh
+make e2e-k3d-m3-recovery
+```
+
 Keep the cluster around for inspection with:
 
 ```sh
 KEEP_CLUSTER=1 make e2e-k3d-m3
+KEEP_CLUSTER=1 make e2e-k3d-m3-recovery
 ```
 
 ## Next Scaffold Steps

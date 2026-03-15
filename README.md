@@ -42,6 +42,12 @@ Run the first k3d-backed M3 end-to-end scenario with:
 make e2e-k3d-m3
 ```
 
+Run the recovery-focused k3d M3 scenario with:
+
+```sh
+make e2e-k3d-m3-recovery
+```
+
 Build the CLI with:
 
 ```sh

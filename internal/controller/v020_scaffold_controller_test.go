@@ -258,8 +258,11 @@ func TestIngestPipelineReconcileCreatesOneShotJobWhenDependenciesResolved(t *tes
 	if got := envVarValue(container.Env, "SHACL_SOURCE_COUNT"); got != "1" {
 		t.Fatalf("unexpected SHACL source count: %q", got)
 	}
-	if !strings.Contains(container.Command[2], "shacl_bin") || !strings.Contains(container.Command[2], "validate --shapes") {
+	if !strings.Contains(container.Command[2], "shacl_classpath") || !strings.Contains(container.Command[2], "shacl.shacl_validate --shapes") {
 		t.Fatalf("expected ingest script to invoke SHACL validation, got %q", container.Command[2])
+	}
+	if strings.Contains(container.Command[2], `[[ -n "${temporary_input}" ]] && rm -f "${temporary_input}"`) {
+		t.Fatalf("expected ingest script cleanup to avoid set -e false negatives, got %q", container.Command[2])
 	}
 	summary := &corev1.ConfigMap{}
 	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: pipeline.Namespace, Name: ingestPipelineSummaryConfigMapName(pipeline)}, summary); err != nil {

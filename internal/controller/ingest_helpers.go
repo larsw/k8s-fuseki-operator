@@ -305,8 +305,11 @@ while IFS= read -r source_file; do
   printf '\n' >> "${shapes_file}"
 done < <(find "${shapes_dir}" -type f ! -name 'combined-shapes.ttl' | sort)
 if [[ ! -s "${shapes_file}" ]]; then echo 'no SHACL shapes were materialized' >&2; exit 1; fi
-shacl_bin="${FUSEKI_HOME:-/opt/fuseki}/bin/shacl"
-if [[ ! -x "${shacl_bin}" ]]; then echo "SHACL CLI not found at ${shacl_bin}" >&2; exit 1; fi
+shacl_classpath="${FUSEKI_HOME:-/opt/fuseki}/fuseki-server.jar"
+shacl_java="${JAVA_HOME:-/opt/java/openjdk}/bin/java"
+if [[ ! -x "${shacl_java}" ]]; then shacl_java="$(command -v java || true)"; fi
+if [[ -z "${shacl_java}" ]] || [[ ! -x "${shacl_java}" ]]; then echo 'Java runtime not found for SHACL validation' >&2; exit 1; fi
+if [[ ! -f "${shacl_classpath}" ]]; then echo "Fuseki SHACL classpath not found at ${shacl_classpath}" >&2; exit 1; fi
 wait_for_fuseki
 if [[ -n "${FUSEKI_ADMIN_USER:-}" ]] && [[ -n "${FUSEKI_ADMIN_PASSWORD:-}" ]]; then
   status=$(curl_fuseki --silent --output /tmp/fuseki-create.out --write-out '%{http_code}' -u "${FUSEKI_ADMIN_USER}:${FUSEKI_ADMIN_PASSWORD}" -H 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8' --data "dbName=${DATASET_NAME}&dbType=${DATASET_DB_TYPE}" "${FUSEKI_BASE_URL}/$/datasets")
@@ -326,10 +329,10 @@ while IFS= read -r file; do
     validation_input="${temporary_input}"
   fi
   report_file="${report_dir}/$(basename "${file}").report.txt"
-  if ! "${shacl_bin}" validate --shapes "${shapes_file}" --data "${validation_input}" > "${report_file}" 2>&1; then
+	if ! "${shacl_java}" -cp "${shacl_classpath}" shacl.shacl_validate --shapes "${shapes_file}" --data "${validation_input}" > "${report_file}" 2>&1; then
     cat "${report_file}" >&2
     if [[ "${SHACL_FAILURE_ACTION:-Reject}" != 'ReportOnly' ]]; then
-      [[ -n "${temporary_input}" ]] && rm -f "${temporary_input}"
+			if [[ -n "${temporary_input}" ]]; then rm -f "${temporary_input}"; fi
       exit 1
     fi
   fi
@@ -338,7 +341,7 @@ while IFS= read -r file; do
   else
     curl_fuseki --silent --show-error --fail "${auth_args[@]}" -X POST -H "Content-Type: ${content_type}" --data-binary "@${file}" "${FUSEKI_IMPORT_URL}"
   fi
-  [[ -n "${temporary_input}" ]] && rm -f "${temporary_input}"
+	if [[ -n "${temporary_input}" ]]; then rm -f "${temporary_input}"; fi
 done < <(find "${stage_dir}" -type f | sort)
 `
 	return strings.ReplaceAll(script, "__TRANSFER_WORKSPACE__", transferWorkspaceMountPath)

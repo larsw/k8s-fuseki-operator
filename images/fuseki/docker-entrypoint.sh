@@ -139,6 +139,19 @@ wait_for_server() {
   return 1
 }
 
+bootstrap_dataset_definitions() {
+  env | while IFS='=' read -r name value; do
+    case "${name}" in
+      FUSEKI_DATASET_CONFIG_DIR)
+        continue
+        ;;
+      FUSEKI_BOOTSTRAP_DATASET_*|FUSEKI_DATASET_*)
+        printf '%s=%s\n' "${name}" "${value}"
+        ;;
+    esac
+  done
+}
+
 create_bootstrap_datasets() {
   local tdb_type="tdb"
   local datasets_url
@@ -155,7 +168,7 @@ create_bootstrap_datasets() {
       -H 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8' \
       --data "dbName=${value}&dbType=${tdb_type}" \
       "${datasets_url}" >/dev/null
-  done < <(env | grep '^FUSEKI_DATASET_' || true)
+  done < <(bootstrap_dataset_definitions)
 }
 
 initialize_base

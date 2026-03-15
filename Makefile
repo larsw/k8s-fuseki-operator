@@ -14,7 +14,7 @@ CONTROLLER_GEN_VERSION ?= v0.20.1
 SETUP_ENVTEST = $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 ENVTEST_K8S_VERSION ?= 1.35.x
 
-.PHONY: fmt vet test verify envtest e2e-k3d-m3 e2e-k3d-m4-oidc e2e-k3d-m4-tls e2e-k3d-m5-backup-restore e2e-k3d-fusekiui-ingress run build-fusekictl run-fusekictl release-sync release-verify release-artifacts helm-lint helm-test bundle-refresh-crds bundle-validate bundle-build generate manifests docker-build-fuseki docker-build-rdf-delta docker-smoke-fuseki docker-smoke-fuseki-ranger docker-smoke-fuseki-all docker-smoke-rdf-delta tidy
+.PHONY: fmt vet test verify envtest e2e-k3d-m3 e2e-k3d-m3-recovery e2e-k3d-m4-oidc e2e-k3d-m4-tls e2e-k3d-m5-backup-restore e2e-k3d-fusekiui-ingress run build-fusekictl run-fusekictl release-sync release-verify release-artifacts helm-lint helm-test bundle-refresh-crds bundle-validate bundle-build generate manifests docker-build-fuseki docker-build-rdf-delta docker-smoke-fuseki docker-smoke-fuseki-ranger docker-smoke-fuseki-all docker-smoke-rdf-delta tidy
 .PHONY: docker-build-controller docker-smoke-controller
 
 fmt:
@@ -33,6 +33,9 @@ envtest: manifests
 
 e2e-k3d-m3:
 	bash ./hack/e2e/k3d-m3.sh
+
+e2e-k3d-m3-recovery:
+	bash ./hack/e2e/k3d-m3-recovery.sh
 
 e2e-k3d-m4-oidc:
 	bash ./hack/e2e/k3d-m4-oidc.sh
