@@ -203,7 +203,7 @@ func deleteIngestJob(ctx context.Context, c client.Client, namespace, name strin
 		return nil
 	}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
-	return client.IgnoreNotFound(c.Delete(ctx, job))
+	return client.IgnoreNotFound(c.Delete(ctx, job, client.GracePeriodSeconds(0)))
 }
 
 func deleteIngestCronJob(ctx context.Context, c client.Client, namespace, name string) error {
