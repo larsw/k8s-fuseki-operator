@@ -1046,9 +1046,344 @@ func TestEnvtestChangeSubscriptionRetriesFailedDeliveryAfterRestart(t *testing.T
 	}
 }
 
+func TestEnvtestIngestPipelineRetainsCompletedStatusAfterRestart(t *testing.T) {
+	t.Helper()
+
+	ctx := context.Background()
+	_, client, scheme := startEnvtestClient(t)
+
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "envtest-ingest-complete"}}
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "example-dataset", Namespace: namespace.Name}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	server := &fusekiv1alpha1.FusekiServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-server", Namespace: namespace.Name},
+		Spec: fusekiv1alpha1.FusekiServerSpec{
+			Image:       "ghcr.io/example/fuseki:6.0.0",
+			DatasetRefs: []corev1.LocalObjectReference{{Name: dataset.Name}},
+		},
+	}
+	policy := &fusekiv1alpha1.SHACLPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-shacl", Namespace: namespace.Name},
+		Spec: fusekiv1alpha1.SHACLPolicySpec{
+			Sources: []fusekiv1alpha1.SHACLSource{{
+				Type:   fusekiv1alpha1.SHACLSourceTypeInline,
+				Inline: "@prefix sh: <http://www.w3.org/ns/shacl#> .\n[] a sh:NodeShape .",
+			}},
+		},
+	}
+	pipeline := &fusekiv1alpha1.IngestPipeline{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-pipeline", Namespace: namespace.Name},
+		Spec: fusekiv1alpha1.IngestPipelineSpec{
+			Target:         fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: dataset.Name}},
+			Source:         fusekiv1alpha1.DataSourceSpec{Type: fusekiv1alpha1.DataSourceTypeURL, URI: "https://example.com/data.ttl"},
+			SHACLPolicyRef: &corev1.LocalObjectReference{Name: policy.Name},
+		},
+	}
+	for _, obj := range []ctrlclient.Object{namespace, dataset, server, policy, pipeline} {
+		if err := client.Create(ctx, obj); err != nil {
+			t.Fatalf("create %T: %v", obj, err)
+		}
+	}
+
+	storedPolicy := persistSHACLPolicyConfigured(t, ctx, client, namespace.Name, policy.Name)
+	storedPipeline := &fusekiv1alpha1.IngestPipeline{}
+	if err := client.Get(ctx, objectKey(namespace.Name, pipeline.Name), storedPipeline); err != nil {
+		t.Fatalf("get pipeline before job creation: %v", err)
+	}
+	completedStartTime := metav1.Now()
+	completedCompletionTime := metav1.NewTime(completedStartTime.Time.Add(time.Minute))
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ingestPipelineJobName(storedPipeline),
+			Namespace: namespace.Name,
+			Annotations: map[string]string{
+				ingestGenerationAnnotation:      strconv.FormatInt(storedPipeline.Generation, 10),
+				ingestReportDirectoryAnnotation: ingestReportDirectory,
+			},
+		},
+		Spec: batchv1.JobSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: "ingest", Image: server.Spec.Image}},
+				},
+			},
+		},
+	}
+	if err := client.Create(ctx, job); err != nil {
+		t.Fatalf("create ingest job: %v", err)
+	}
+	persistJobStatus(t, ctx, client, namespace.Name, job.Name, batchv1.JobStatus{
+		StartTime:      &completedStartTime,
+		CompletionTime: &completedCompletionTime,
+		Succeeded:      1,
+		Conditions: []batchv1.JobCondition{
+			{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue},
+			{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+		},
+	})
+
+	reconciler := &IngestPipelineReconciler{Client: client, Scheme: scheme}
+	result, err := reconciler.Reconcile(ctx, reconcileRequest(pipeline))
+	if err != nil {
+		t.Fatalf("reconcile completed ingest pipeline: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue for completed one-shot ingest, got %s", result.RequeueAfter)
+	}
+
+	updated := &fusekiv1alpha1.IngestPipeline{}
+	if err := client.Get(ctx, objectKey(namespace.Name, pipeline.Name), updated); err != nil {
+		t.Fatalf("get updated ingest pipeline: %v", err)
+	}
+	if updated.Status.Phase != "Succeeded" {
+		t.Fatalf("unexpected phase after completed ingest: %q", updated.Status.Phase)
+	}
+	if updated.Status.LastRunTime == nil {
+		t.Fatalf("unexpected last run time after completed ingest: %#v", updated.Status.LastRunTime)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, ingestCompletedConditionType)
+	if condition == nil || condition.Reason != "IngestCompleted" {
+		t.Fatalf("expected IngestCompleted condition, got %#v", condition)
+	}
+	summary := &corev1.ConfigMap{}
+	if err := client.Get(ctx, objectKey(namespace.Name, ingestPipelineSummaryConfigMapName(updated)), summary); err != nil {
+		t.Fatalf("get ingest summary: %v", err)
+	}
+	if got := summary.Data["phase"]; got != "Succeeded" {
+		t.Fatalf("unexpected summary phase after completed ingest: %q", got)
+	}
+	if got := summary.Data["executionReason"]; got != "IngestCompleted" {
+		t.Fatalf("unexpected summary execution reason after completed ingest: %q", got)
+	}
+	if got := summary.Data["lastRunTime"]; got == "" {
+		t.Fatalf("expected summary lastRunTime after completed ingest, got empty value")
+	}
+	if got := summary.Data["failureAction"]; got != string(storedPolicy.DesiredFailureAction()) {
+		t.Fatalf("unexpected summary failure action after completed ingest: %q", got)
+	}
+
+	persistedJob := &batchv1.Job{}
+	if err := client.Get(ctx, objectKey(namespace.Name, job.Name), persistedJob); err != nil {
+		t.Fatalf("get completed ingest job before restart reconcile: %v", err)
+	}
+	jobResourceVersion := persistedJob.ResourceVersion
+
+	result, err = reconciler.Reconcile(ctx, reconcileRequest(pipeline))
+	if err != nil {
+		t.Fatalf("reconcile completed ingest pipeline after restart: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue when completed ingest status is already persisted, got %s", result.RequeueAfter)
+	}
+	if err := client.Get(ctx, objectKey(namespace.Name, job.Name), persistedJob); err != nil {
+		t.Fatalf("get completed ingest job after restart reconcile: %v", err)
+	}
+	if persistedJob.ResourceVersion != jobResourceVersion {
+		t.Fatalf("expected completed ingest job to remain unchanged across restart reconcile, got resourceVersion %q -> %q", jobResourceVersion, persistedJob.ResourceVersion)
+	}
+}
+
+func TestEnvtestIngestPipelineRetriesFailedJobAfterGenerationChange(t *testing.T) {
+	t.Helper()
+
+	ctx := context.Background()
+	_, client, scheme := startEnvtestClient(t)
+
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "envtest-ingest-retry"}}
+	dataset := &fusekiv1alpha1.Dataset{ObjectMeta: metav1.ObjectMeta{Name: "example-dataset", Namespace: namespace.Name}, Spec: fusekiv1alpha1.DatasetSpec{Name: "primary"}}
+	server := &fusekiv1alpha1.FusekiServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-server", Namespace: namespace.Name},
+		Spec: fusekiv1alpha1.FusekiServerSpec{
+			Image:       "ghcr.io/example/fuseki:6.0.0",
+			DatasetRefs: []corev1.LocalObjectReference{{Name: dataset.Name}},
+		},
+	}
+	policy := &fusekiv1alpha1.SHACLPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-shacl", Namespace: namespace.Name},
+		Spec: fusekiv1alpha1.SHACLPolicySpec{
+			Sources: []fusekiv1alpha1.SHACLSource{{
+				Type:   fusekiv1alpha1.SHACLSourceTypeInline,
+				Inline: "@prefix sh: <http://www.w3.org/ns/shacl#> .\n[] a sh:NodeShape .",
+			}},
+			FailureAction: fusekiv1alpha1.SHACLFailureActionReportOnly,
+		},
+	}
+	pipeline := &fusekiv1alpha1.IngestPipeline{
+		ObjectMeta: metav1.ObjectMeta{Name: "example-pipeline", Namespace: namespace.Name},
+		Spec: fusekiv1alpha1.IngestPipelineSpec{
+			Target:         fusekiv1alpha1.DatasetAccessTarget{DatasetRef: corev1.LocalObjectReference{Name: dataset.Name}},
+			Source:         fusekiv1alpha1.DataSourceSpec{Type: fusekiv1alpha1.DataSourceTypeURL, URI: "https://example.com/data.ttl"},
+			SHACLPolicyRef: &corev1.LocalObjectReference{Name: policy.Name},
+		},
+	}
+	for _, obj := range []ctrlclient.Object{namespace, dataset, server, policy, pipeline} {
+		if err := client.Create(ctx, obj); err != nil {
+			t.Fatalf("create %T: %v", obj, err)
+		}
+	}
+
+	storedPolicy := persistSHACLPolicyConfigured(t, ctx, client, namespace.Name, policy.Name)
+	storedPipeline := &fusekiv1alpha1.IngestPipeline{}
+	if err := client.Get(ctx, objectKey(namespace.Name, pipeline.Name), storedPipeline); err != nil {
+		t.Fatalf("get pipeline before failed job creation: %v", err)
+	}
+	failedStartTime := metav1.Now()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ingestPipelineJobName(storedPipeline),
+			Namespace: namespace.Name,
+			Annotations: map[string]string{
+				ingestGenerationAnnotation:      strconv.FormatInt(storedPipeline.Generation, 10),
+				ingestReportDirectoryAnnotation: ingestReportDirectory,
+			},
+		},
+		Spec: batchv1.JobSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: "ingest", Image: server.Spec.Image}},
+				},
+			},
+		},
+	}
+	if err := client.Create(ctx, job); err != nil {
+		t.Fatalf("create failed ingest job: %v", err)
+	}
+	persistJobStatus(t, ctx, client, namespace.Name, job.Name, batchv1.JobStatus{
+		StartTime: &failedStartTime,
+		Failed:    1,
+		Conditions: []batchv1.JobCondition{
+			{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue},
+			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue},
+		},
+	})
+
+	reconciler := &IngestPipelineReconciler{Client: client, Scheme: scheme}
+	result, err := reconciler.Reconcile(ctx, reconcileRequest(pipeline))
+	if err != nil {
+		t.Fatalf("reconcile failed ingest pipeline: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue for failed one-shot ingest, got %s", result.RequeueAfter)
+	}
+
+	updated := &fusekiv1alpha1.IngestPipeline{}
+	if err := client.Get(ctx, objectKey(namespace.Name, pipeline.Name), updated); err != nil {
+		t.Fatalf("get failed ingest pipeline: %v", err)
+	}
+	if updated.Status.Phase != "Failed" {
+		t.Fatalf("unexpected phase after failed ingest: %q", updated.Status.Phase)
+	}
+	condition := apimeta.FindStatusCondition(updated.Status.Conditions, ingestCompletedConditionType)
+	if condition == nil || condition.Reason != "IngestFailed" {
+		t.Fatalf("expected IngestFailed condition, got %#v", condition)
+	}
+	summary := &corev1.ConfigMap{}
+	if err := client.Get(ctx, objectKey(namespace.Name, ingestPipelineSummaryConfigMapName(updated)), summary); err != nil {
+		t.Fatalf("get failed ingest summary: %v", err)
+	}
+	if got := summary.Data["executionReason"]; got != "IngestFailed" {
+		t.Fatalf("unexpected summary execution reason after failed ingest: %q", got)
+	}
+	if got := summary.Data["failureAction"]; got != string(storedPolicy.DesiredFailureAction()) {
+		t.Fatalf("unexpected summary failure action after failed ingest: %q", got)
+	}
+
+	retryPipeline := &fusekiv1alpha1.IngestPipeline{}
+	if err := client.Get(ctx, objectKey(namespace.Name, pipeline.Name), retryPipeline); err != nil {
+		t.Fatalf("get ingest pipeline before retry update: %v", err)
+	}
+	retryPipeline.Spec.Source.URI = "https://example.com/retry.ttl"
+	if err := client.Update(ctx, retryPipeline); err != nil {
+		t.Fatalf("update ingest pipeline for retry: %v", err)
+	}
+	if err := client.Get(ctx, objectKey(namespace.Name, pipeline.Name), retryPipeline); err != nil {
+		t.Fatalf("get ingest pipeline after retry update: %v", err)
+	}
+
+	result, err = reconciler.Reconcile(ctx, reconcileRequest(pipeline))
+	if err != nil {
+		t.Fatalf("reconcile ingest retry cleanup: %v", err)
+	}
+	if result.RequeueAfter != transferRequestRequeueInterval {
+		t.Fatalf("expected requeue interval %s while replacing failed ingest job, got %s", transferRequestRequeueInterval, result.RequeueAfter)
+	}
+	if err := waitForJobDeletion(ctx, client, namespace.Name, job.Name); err != nil {
+		t.Fatalf("expected failed ingest job to be deleted before retry: %v", err)
+	}
+
+	result, err = reconciler.Reconcile(ctx, reconcileRequest(pipeline))
+	if err != nil {
+		t.Fatalf("reconcile ingest retry creation: %v", err)
+	}
+	if result.RequeueAfter != transferRequestRequeueInterval {
+		t.Fatalf("expected requeue interval %s after creating retry ingest job, got %s", transferRequestRequeueInterval, result.RequeueAfter)
+	}
+
+	if err := client.Get(ctx, objectKey(namespace.Name, pipeline.Name), updated); err != nil {
+		t.Fatalf("get ingest pipeline after retry creation: %v", err)
+	}
+	if updated.Status.Phase != "Running" {
+		t.Fatalf("unexpected phase after retry ingest job creation: %q", updated.Status.Phase)
+	}
+	condition = apimeta.FindStatusCondition(updated.Status.Conditions, ingestCompletedConditionType)
+	if condition == nil || condition.Reason != "IngestPending" {
+		t.Fatalf("expected IngestPending condition after retry creation, got %#v", condition)
+	}
+	retriedJob := &batchv1.Job{}
+	if err := client.Get(ctx, objectKey(namespace.Name, ingestPipelineJobName(updated)), retriedJob); err != nil {
+		t.Fatalf("get retried ingest job: %v", err)
+	}
+	if got := retriedJob.Annotations[ingestGenerationAnnotation]; got != strconv.FormatInt(retryPipeline.Generation, 10) {
+		t.Fatalf("unexpected retried ingest job generation annotation: %q", got)
+	}
+	container := retriedJob.Spec.Template.Spec.Containers[0]
+	if got := envVarValue(container.Env, "TRANSFER_SOURCE_URI"); got != "https://example.com/retry.ttl" {
+		t.Fatalf("unexpected retried ingest source URI: %q", got)
+	}
+	if err := client.Get(ctx, objectKey(namespace.Name, ingestPipelineSummaryConfigMapName(updated)), summary); err != nil {
+		t.Fatalf("get retried ingest summary: %v", err)
+	}
+	if got := summary.Data["executionReason"]; got != "IngestPending" {
+		t.Fatalf("unexpected summary execution reason after retry creation: %q", got)
+	}
+	if got := summary.Data["failureAction"]; got != string(storedPolicy.DesiredFailureAction()) {
+		t.Fatalf("unexpected summary failure action after retry creation: %q", got)
+	}
+	if got := summary.Data["targetKind"]; got != "Job" {
+		t.Fatalf("unexpected summary target kind after retry creation: %q", got)
+	}
+}
+
 func startEnvtestClient(t *testing.T) (*envtest.Environment, ctrlclient.Client, *runtime.Scheme) {
 	t.Helper()
 	return startEnvtestClientWithAdditionalCRDPaths(t)
+}
+
+func persistSHACLPolicyConfigured(t *testing.T, ctx context.Context, client ctrlclient.Client, namespace, name string) *fusekiv1alpha1.SHACLPolicy {
+	t.Helper()
+
+	policy := &fusekiv1alpha1.SHACLPolicy{}
+	if err := client.Get(ctx, objectKey(namespace, name), policy); err != nil {
+		t.Fatalf("get SHACL policy before status update: %v", err)
+	}
+	policy.Status.ObservedGeneration = policy.Generation
+	policy.Status.Phase = "Ready"
+	policy.Status.Conditions = []metav1.Condition{{
+		Type:               configuredConditionType,
+		Status:             metav1.ConditionTrue,
+		Reason:             "SourcesResolved",
+		Message:            "SHACL sources are resolved.",
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: policy.Generation,
+	}}
+	if err := client.Status().Update(ctx, policy); err != nil {
+		t.Fatalf("update SHACL policy status: %v", err)
+	}
+	if err := client.Get(ctx, objectKey(namespace, name), policy); err != nil {
+		t.Fatalf("get SHACL policy after status update: %v", err)
+	}
+	return policy
 }
 
 func persistChangeSubscriptionStatus(t *testing.T, ctx context.Context, client ctrlclient.Client, namespace, name, checkpoint string) *fusekiv1alpha1.ChangeSubscription {
