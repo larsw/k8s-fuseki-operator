@@ -204,6 +204,16 @@ spec:
                 - update
                 - patch
             - apiGroups:
+                - ""
+              resources:
+                - pods
+                - services
+                - configmaps
+                - secrets
+                - persistentvolumeclaims
+              verbs:
+                - delete
+            - apiGroups:
                 - apps
               resources:
                 - statefulsets

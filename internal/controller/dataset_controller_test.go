@@ -53,10 +53,10 @@ func TestDatasetReconcileCreatesGenericConfigMap(t *testing.T) {
 		t.Fatalf("get configmap: %v", err)
 	}
 
-	if got := configMap.Data["spatial.properties"]; got == "" {
-		t.Fatalf("expected spatial properties to be rendered")
+	if got := configMap.Data["spatial.properties"]; got == "" || containsLine(got, "spatial.enabled=true") {
+		t.Fatalf("expected spatial properties without duplicate enabled flag, got %q", got)
 	}
-	if got := configMap.Data["dataset.properties"]; got == "" || containsLine(got, "write.url=http://") || containsLine(got, "target.name=") {
+	if got := configMap.Data["dataset.properties"]; got == "" || !containsLine(got, "spatial.enabled=true") || containsLine(got, "write.url=http://") || containsLine(got, "target.name=") {
 		t.Fatalf("expected generic dataset properties without target binding, got %q", got)
 	}
 

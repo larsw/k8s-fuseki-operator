@@ -1,102 +1,122 @@
 # fuseki-operator
 
-`fuseki-operator` manages Apache Jena Fuseki clusters on Kubernetes using RDF Delta for write replication and failover coordination.
+`fuseki-operator` manages Apache Jena Fuseki on Kubernetes, with support for RDF Delta-backed clustered write coordination, dataset bootstrap, access-control configuration, ingress publication, UI wiring, and backup or restore workflows.
 
-This repository now includes working M3 through M5 operator flows plus the first M6 CLI slice:
+## Status
 
-- controller-runtime based reconcilers for clusters, datasets, RDF Delta, security, endpoints, UI, and backup/restore
-- k3d end-to-end scenarios for M3, M4, and M5 user flows
-- project-owned Fuseki and RDF Delta images under `images/`
-- a repo-packaged install bundle under `config/default`
-- a `fusekictl` CLI for install, uninstall, status, restore inspection and logs, backup trigger, and typed resource lifecycle workflows
-- an initial Helm chart under `charts/fuseki-operator` for operator installation
-- an initial OLM bundle scaffold under `bundle/` for release packaging
+The project is currently `alpha`.
 
-## Module Path
+What that means in practice:
 
-The canonical Go module path is `github.com/larsw/k8s-fuseki-operator`.
+- the core CRDs and reconciler flows are implemented and exercised in local test and k3d end-to-end scenarios
+- Helm packaging, release metadata, and OLM bundle packaging exist in-repo
+- the API is still `v1alpha1`, so breaking changes are still possible between releases
+- production rollout guidance, upgrade guarantees, and support policy are not yet fully documented
+
+Release metadata currently lives in [release/metadata.env](release/metadata.env).
+
+## Current Capabilities
+
+- manage `Dataset`, `RDFDeltaServer`, `FusekiCluster`, `FusekiServer`, `Endpoint`, `FusekiUI`, `BackupPolicy`, and `RestoreRequest` resources
+- bootstrap TDB2 datasets, including spatial dataset configuration
+- run clustered Fuseki with RDF Delta-backed write coordination
+- configure access control with `SecurityProfile` and `SecurityPolicy`
+- expose workloads through internal Services and endpoint publication resources
+- trigger and inspect backup or restore workflows
+- install the operator with `fusekictl`, Kustomize, or Helm
+- package the operator for Helm and OLM release flows
 
 ## Quick Start
+
+### Local Development
 
 ```sh
 go mod tidy
 make test
-make run
-```
-
-Run the main local verification sweep with:
-
-```sh
 make verify
 ```
 
-Generate CRDs after API changes with:
+Run the controller locally:
+
+```sh
+make run
+```
+
+Regenerate CRDs after API changes:
 
 ```sh
 make manifests
 ```
 
-Run the first k3d-backed M3 end-to-end scenario with:
+### Install With Helm
 
 ```sh
-make e2e-k3d-m3
+helm upgrade --install fuseki-operator ./charts/fuseki-operator \
+  -n fuseki-system --create-namespace
 ```
 
-Run the recovery-focused k3d M3 scenario with:
+Validate the chart locally with:
 
 ```sh
-make e2e-k3d-m3-recovery
+make helm-lint
+make helm-test
 ```
 
-Build the CLI with:
+### Install With `fusekictl`
+
+Build the CLI:
 
 ```sh
 make build-fusekictl
 ```
 
-Or install it directly from the published module path with:
-
-```sh
-go install github.com/larsw/k8s-fuseki-operator/cmd/fusekictl@latest
-```
-
-Install the operator from the packaged bundle with:
+Install the operator from the packaged bundle:
 
 ```sh
 ./bin/fusekictl install
 ```
 
-`fusekictl install` defaults the controller image tag to the current `fusekictl` version. Use `--tag` to change only the official GHCR tag or `--image` to replace the full controller image reference.
-
-Install the operator with Helm using the initial chart with:
+Or install the latest tagged CLI directly:
 
 ```sh
-helm install fuseki-operator ./charts/fuseki-operator -n fuseki-system --create-namespace
-make helm-test
+go install github.com/larsw/k8s-fuseki-operator/cmd/fusekictl@latest
 ```
 
-Override the controller image tag or pin scheduling-related values with a small values file or `--set`, for example:
+## Example Workflow
+
+Create a dataset, RDF Delta server, and Fuseki cluster:
 
 ```sh
-helm upgrade --install fuseki-operator ./charts/fuseki-operator \
-	-n fuseki-system --create-namespace \
-	--set image.tag=v0.1.2 \
-	--set nodeSelector."kubernetes\.io/os"=linux
+./bin/fusekictl create dataset example-dataset --dataset-name primary --spatial -n default
+./bin/fusekictl create rdfdeltaserver example-delta --image ghcr.io/larsw/k8s-fuseki-operator/rdf-delta:v0.1.2 -n default
+./bin/fusekictl create fusekicluster example \
+  --image ghcr.io/larsw/k8s-fuseki-operator/fuseki:v0.1.2 \
+  --rdf-delta-server example-delta \
+  --dataset example-dataset \
+  -n default
 ```
 
-Validate the initial OLM bundle scaffold with:
+Inspect operator and custom-resource state:
 
 ```sh
-make release-sync
-make release-verify
-make bundle-validate
+./bin/fusekictl status
 ```
 
-For release preparation, the repository now treats `main` as the integration branch, `release/x.y` as stabilization branches, and `vX.Y.Z` tags as the trigger for draft GitHub Releases with packaged artifacts.
+## Access Control
 
-## Custom Fuseki Image
+Authentication, authorization, TLS, OIDC integration, and audit-related behavior are documented in [docs/accesscontrol.md](docs/accesscontrol.md).
 
-The image scaffold is pinned through [images/fuseki/versions.mk](images/fuseki/versions.mk), which currently tracks Apache Jena Fuseki 6.0.0. You can override those values on the command line if needed:
+## Images
+
+The repository builds and packages project-owned runtime images:
+
+- controller image from `images/controller/Dockerfile`
+- Fuseki image from `images/fuseki`
+- RDF Delta image from `images/rdf-delta`
+
+The checked-in Fuseki image version inputs live in [images/fuseki/versions.mk](images/fuseki/versions.mk).
+
+Useful local image targets:
 
 ```sh
 make docker-build-controller
@@ -105,4 +125,50 @@ make docker-build-fuseki
 make docker-smoke-fuseki-all
 ```
 
-See [docs/development.md](docs/development.md) for local setup details, [docs/fusekictl.md](docs/fusekictl.md) for CLI usage, and [docs/release-packaging.md](docs/release-packaging.md) for Helm and OLM packaging workflow notes.
+## End-To-End Coverage
+
+The repository includes k3d-backed end-to-end scenarios for core cluster provisioning, recovery, ingress, OIDC, TLS, backup, and restore flows. Examples:
+
+```sh
+make e2e-k3d-m3
+make e2e-k3d-m3-recovery
+make e2e-k3d-fusekiui-ingress
+make e2e-k3d-m4-oidc
+make e2e-k3d-m4-tls
+make e2e-k3d-m5-backup-restore
+```
+
+## Packaging And Release
+
+The repository includes:
+
+- a Helm chart under `charts/fuseki-operator`
+- an OLM bundle under `bundle/`
+- generated release metadata driven from `release/metadata.env`
+- CI and release workflows under `.github/workflows/`
+
+Common release preparation commands:
+
+```sh
+make release-sync
+make release-verify
+make bundle-validate
+make release-artifacts
+```
+
+See [docs/release-packaging.md](docs/release-packaging.md) for packaging details and release workflow notes.
+
+## Known Gaps For Alpha
+
+- API compatibility is not yet stabilized beyond `v1alpha1`
+- upgrade guidance and version-to-version compatibility notes still need to be tightened
+- OLM metadata is functional but still minimal
+- the project does not yet document a formal production support matrix
+- audit behavior is currently tied to the underlying Fuseki and Ranger runtime behavior rather than a dedicated operator-managed audit API
+
+## Documentation
+
+- [docs/development.md](docs/development.md): local development and verification
+- [docs/fusekictl.md](docs/fusekictl.md): CLI usage
+- [docs/release-packaging.md](docs/release-packaging.md): Helm, bundle, and release packaging workflow
+- [docs/accesscontrol.md](docs/accesscontrol.md): authentication, authorization, TLS, OIDC, and audit guidance

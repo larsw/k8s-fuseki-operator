@@ -155,7 +155,6 @@ func renderDatasetProperties(dataset *fusekiv1alpha1.Dataset) string {
 func renderSpatialProperties(dataset *fusekiv1alpha1.Dataset) string {
 	spatial := dataset.Spec.Spatial
 	properties := []string{
-		"spatial.enabled=true",
 		"spatial.indexPath=" + dataset.DesiredSpatialIndexPath(),
 	}
 	if spatial == nil {
