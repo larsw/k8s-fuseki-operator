@@ -15,10 +15,18 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.accumulo.access.AccessEvaluator;
 import org.apache.accumulo.access.AccessExpression;
 import org.apache.accumulo.access.Authorizations;
+import org.apache.jena.graph.Node;
+import org.apache.jena.graph.NodeFactory;
+import org.apache.jena.graph.Triple;
+import org.apache.jena.sparql.core.DatasetGraph;
+import org.apache.jena.fuseki.server.DataAccessPoint;
+import org.apache.jena.fuseki.server.DataAccessPointRegistry;
 
 import com.google.gson.Gson;
 
@@ -35,6 +43,7 @@ final class FusekiAuthorizationFilter implements Filter {
 	private static final Gson GSON = new Gson();
 	private static final String MODE_LOCAL = "local";
 	private static final String MODE_RANGER = "ranger";
+	private static final String DEFAULT_TAG_PREDICATE = "https://fuseki.apache.org/security#expression";
 	private static final List<String> USER_HEADER_NAMES = List.of("X-Forwarded-User", "X-Remote-User");
 	private static final List<String> GROUP_HEADER_NAMES = List.of("X-Forwarded-Groups", "X-Remote-Groups", "X-OIDC-Groups");
 	private static final List<String> ROLE_HEADER_NAMES = List.of("X-Forwarded-Roles", "X-Remote-Roles", "X-Ranger-Roles");
@@ -47,6 +56,37 @@ final class FusekiAuthorizationFilter implements Filter {
 		"using-graph-uri",
 		"using-named-graph-uri"
 	);
+
+	/**
+	 * Cache for expression evaluation results.
+	 *
+	 * The key is (normalizedExpression + "\0" + sortedAuthorizations), which is
+	 * unique per distinct (expression, authorization-set) pair. Evaluation is
+	 * side-effect-free so the result can be reused without any TTL.
+	 *
+	 * A simple bounded LRU is approximated by evicting all entries once the map
+	 * reaches MAX_CACHE_SIZE. This is intentionally simple and avoids pulling in
+	 * an extra dependency; a production deployment where working-set churn matters
+	 * can replace this with a proper LRU implementation.
+	 */
+	private static final int MAX_CACHE_SIZE = 8192;
+	private static final ConcurrentHashMap<String, Boolean> EXPRESSION_CACHE = new ConcurrentHashMap<>(MAX_CACHE_SIZE);
+
+	static boolean cachedCanAccess(String expression, Set<String> authorizations) {
+		// Build a stable, order-independent cache key.
+		String authKey = String.join(",", new TreeSet<>(authorizations));
+		String cacheKey = expression + "\0" + authKey;
+		Boolean cached = EXPRESSION_CACHE.get(cacheKey);
+		if (cached != null) {
+			return cached;
+		}
+		boolean result = AccessEvaluator.of(Authorizations.of(authorizations)).canAccess(expression);
+		if (EXPRESSION_CACHE.size() >= MAX_CACHE_SIZE) {
+			EXPRESSION_CACHE.clear();
+		}
+		EXPRESSION_CACHE.put(cacheKey, result);
+		return result;
+	}
 
 	private final boolean failClosed;
 	private final Map<String, DatasetPolicySet> datasetPolicies;
@@ -164,7 +204,7 @@ final class FusekiAuthorizationFilter implements Filter {
 			}
 
 			DatasetPolicySet policySet = DatasetPolicySet.fromBundle(datasetName, bundlePath, failClosed);
-			if (!policySet.rules().isEmpty()) {
+			if (!policySet.rules().isEmpty() || !policySet.graphTaggingRules().isEmpty()) {
 				policies.put(datasetName, policySet);
 			}
 		}
@@ -365,7 +405,7 @@ final class FusekiAuthorizationFilter implements Filter {
 		}
 	}
 
-	private record DatasetPolicySet(String datasetName, List<PolicyRule> rules) {
+	private record DatasetPolicySet(String datasetName, List<PolicyRule> rules, List<GraphTaggingRule> graphTaggingRules) {
 		static DatasetPolicySet fromBundle(String datasetName, Path bundlePath, boolean failClosed) throws IOException {
 			Bundle bundle;
 			try (Reader reader = Files.newBufferedReader(bundlePath, StandardCharsets.UTF_8)) {
@@ -375,40 +415,59 @@ final class FusekiAuthorizationFilter implements Filter {
 				if (failClosed) {
 					throw new IllegalStateException("Authorization bundle is empty: " + bundlePath);
 				}
-				return new DatasetPolicySet(datasetName, List.of());
+				return new DatasetPolicySet(datasetName, List.of(), List.of());
 			}
 
 			List<PolicyRule> rules = new ArrayList<>();
+			List<GraphTaggingRule> graphTaggingRules = new ArrayList<>();
+
 			for (Policy policy : bundle.policies) {
-				if (policy == null || policy.rules == null) {
+				if (policy == null) {
 					continue;
 				}
-				for (Rule rule : policy.rules) {
-					if (rule == null || rule.target == null) {
-						continue;
-					}
-					if (!datasetName.equals(rule.target.datasetRef)) {
-						continue;
-					}
-					try {
-						AccessExpression.validate(rule.expression);
-					} catch (RuntimeException exception) {
-						if (failClosed) {
-							throw new IllegalStateException(
-								"Invalid " + rule.expressionType + " expression in " + bundlePath + ": " + rule.expression,
-								exception
-							);
+				// Static rules
+				if (policy.rules != null) {
+					for (Rule rule : policy.rules) {
+						if (rule == null || rule.target == null) {
+							continue;
 						}
-						continue;
+						if (!datasetName.equals(rule.target.datasetRef)) {
+							continue;
+						}
+						try {
+							AccessExpression.validate(rule.expression);
+						} catch (RuntimeException exception) {
+							if (failClosed) {
+								throw new IllegalStateException(
+									"Invalid " + rule.expressionType + " expression in " + bundlePath + ": " + rule.expression,
+									exception
+								);
+							}
+							continue;
+						}
+						rules.add(PolicyRule.fromRule(rule));
 					}
-					rules.add(PolicyRule.fromRule(rule));
+				}
+				// RDF* graph tagging rules
+				if (policy.graphTagging != null) {
+					for (GraphTaggingRuleJson tag : policy.graphTagging) {
+						if (tag == null || tag.datasetRef == null) {
+							continue;
+						}
+						if (!datasetName.equals(tag.datasetRef)) {
+							continue;
+						}
+						graphTaggingRules.add(GraphTaggingRule.fromJson(tag));
+					}
 				}
 			}
-			return new DatasetPolicySet(datasetName, List.copyOf(rules));
+			return new DatasetPolicySet(datasetName, List.copyOf(rules), List.copyOf(graphTaggingRules));
 		}
 
 		AuthorizationDecision authorize(RequestPrincipal principal, RequestAction action, String namedGraph) {
-			boolean allowed = false;
+			// --- Static rules ---
+			boolean staticAllowed = false;
+			boolean staticRuleApplied = false;
 			for (PolicyRule rule : rules) {
 				if (!rule.appliesTo(action, namedGraph)) {
 					continue;
@@ -419,9 +478,125 @@ final class FusekiAuthorizationFilter implements Filter {
 				if (rule.deny()) {
 					return AuthorizationDecision.deny(HttpServletResponse.SC_FORBIDDEN, "Forbidden");
 				}
-				allowed = true;
+				staticAllowed = true;
+				staticRuleApplied = true;
 			}
-			return allowed ? AuthorizationDecision.allow() : AuthorizationDecision.deny(HttpServletResponse.SC_FORBIDDEN, "Forbidden");
+			if (staticRuleApplied) {
+				return staticAllowed
+					? AuthorizationDecision.allow()
+					: AuthorizationDecision.deny(HttpServletResponse.SC_FORBIDDEN, "Forbidden");
+			}
+
+			// --- RDF* graph tagging (only evaluated when a named graph is targeted and no static rule matched) ---
+			if (namedGraph != null && !graphTaggingRules.isEmpty()) {
+				for (GraphTaggingRule tag : graphTaggingRules) {
+					if (!tag.appliesTo(action)) {
+						continue;
+					}
+					if (!tag.subjectMatches(principal)) {
+						continue;
+					}
+					// Look up the security expression embedded in the graph data.
+					String expression = resolveGraphTagExpression(datasetName, namedGraph, tag.tagPredicate());
+					if (expression == null) {
+						// No annotation found — treat as no rule for this graph.
+						continue;
+					}
+					try {
+						AccessExpression.validate(expression);
+					} catch (RuntimeException ignored) {
+						// Malformed annotation — skip; fail-closed is handled at bundle-load for static rules,
+						// but dynamic annotations may be authored independently.
+						continue;
+					}
+					if (!cachedCanAccess(expression, principal.authorizations())) {
+						return AuthorizationDecision.deny(HttpServletResponse.SC_FORBIDDEN, "Forbidden");
+					}
+					return AuthorizationDecision.allow();
+				}
+			}
+
+			// No rule matched at all.
+			if (!rules.isEmpty() || !graphTaggingRules.isEmpty()) {
+				return AuthorizationDecision.deny(HttpServletResponse.SC_FORBIDDEN, "Forbidden");
+			}
+			return AuthorizationDecision.allow();
+		}
+
+		/**
+		 * Resolves the security expression for a named graph by querying the Fuseki
+		 * DatasetGraph for an RDF* annotation of the form:
+		 *
+		 * <pre>
+		 * << <graphUri> <tagPredicate> ?expression >>
+		 * </pre>
+		 *
+		 * The annotation triple lives in the default graph of the dataset (it is
+		 * metadata about the graph, not data inside it).
+		 *
+		 * Returns {@code null} if no annotation is found.
+		 */
+		private static String resolveGraphTagExpression(String datasetName, String namedGraph, String tagPredicate) {
+			try {
+				DataAccessPointRegistry registry = DataAccessPointRegistry.get(null);
+				if (registry == null) {
+					return null;
+				}
+				DataAccessPoint dap = registry.get("/" + datasetName);
+				if (dap == null) {
+					dap = registry.get(datasetName);
+				}
+				if (dap == null) {
+					return null;
+				}
+				DatasetGraph dsg = dap.getDataService().getDataset();
+				Node graphNode = NodeFactory.createURI(namedGraph);
+				Node predNode  = NodeFactory.createURI(tagPredicate);
+
+				// Primary lookup: plain triple <graphNode> <tagPredicate> "expression"
+				// stored in the default graph (graph metadata, not graph content).
+				var iter = dsg.getDefaultGraph().find(graphNode, predNode, Node.ANY);
+				try {
+					while (iter.hasNext()) {
+						Node obj = iter.next().getObject();
+						if (obj.isLiteral()) {
+							return obj.getLiteralLexicalForm();
+						}
+					}
+				} finally {
+					iter.close();
+				}
+
+				// Secondary lookup: RDF* annotation stored as a quoted-triple subject
+				// << <graphNode> <tagPredicate> "expression" >> <anyPred> <anyObj>
+				// Jena stores quoted triples in the default graph; we iterate and match.
+				var iter2 = dsg.getDefaultGraph().find(Node.ANY, Node.ANY, Node.ANY);
+				try {
+					while (iter2.hasNext()) {
+						Triple t = iter2.next();
+						Node subj = t.getSubject();
+						if (!subj.isTripleTerm()) {
+							continue;
+						}
+						Triple inner = subj.getTriple();
+						if (!inner.getSubject().equals(graphNode)) {
+							continue;
+						}
+						if (!inner.getPredicate().equals(predNode)) {
+							continue;
+						}
+						Node obj = inner.getObject();
+						if (obj.isLiteral()) {
+							return obj.getLiteralLexicalForm();
+						}
+					}
+				} finally {
+					iter2.close();
+				}
+			} catch (Exception ignored) {
+				// Defensive: any reflection/registry failure must not break the request path.
+			}
+			return null;
 		}
 	}
 
@@ -474,12 +649,50 @@ final class FusekiAuthorizationFilter implements Filter {
 			if (!subjectMatched) {
 				return false;
 			}
-			AccessEvaluator evaluator = AccessEvaluator.of(Authorizations.of(principal.authorizations()));
-			return evaluator.canAccess(expression);
+			return cachedCanAccess(expression, principal.authorizations());
 		}
 	}
 
 	private record Subject(String type, String value, String claim) {}
+
+	/**
+	 * Compiled form of a graphTagging bundle entry.
+	 */
+	private record GraphTaggingRule(Set<RequestAction> actions, List<Subject> subjects, String tagPredicate) {
+		static GraphTaggingRule fromJson(GraphTaggingRuleJson json) {
+			Set<RequestAction> actions = new LinkedHashSet<>();
+			for (String action : emptyIfNull(json.actions)) {
+				switch (action) {
+					case "Query"  -> actions.add(RequestAction.QUERY);
+					case "Read"   -> actions.add(RequestAction.READ);
+					case "Update" -> actions.add(RequestAction.UPDATE);
+					case "Write"  -> actions.add(RequestAction.WRITE);
+					default -> {}
+				}
+			}
+			List<Subject> subjects = new ArrayList<>();
+			for (GraphTaggingSubjectJson s : emptyIfNull(json.subjects)) {
+				subjects.add(new Subject(s.type, s.value == null ? "" : s.value, s.claim == null ? "" : s.claim));
+			}
+			String predicate = (json.tagPredicate == null || json.tagPredicate.isBlank())
+				? DEFAULT_TAG_PREDICATE
+				: json.tagPredicate;
+			return new GraphTaggingRule(Set.copyOf(actions), List.copyOf(subjects), predicate);
+		}
+
+		boolean appliesTo(RequestAction action) {
+			return actions.contains(action);
+		}
+
+		boolean subjectMatches(RequestPrincipal principal) {
+			for (Subject subject : subjects) {
+				if (principal.matchesSubject(subject)) {
+					return true;
+				}
+			}
+			return false;
+		}
+	}
 
 	private static String firstNonBlank(String primary, List<String> fallbacks) {
 		if (primary != null && !primary.isBlank()) {
@@ -528,6 +741,7 @@ final class FusekiAuthorizationFilter implements Filter {
 
 	private static final class Policy {
 		private List<Rule> rules;
+		private List<GraphTaggingRuleJson> graphTagging;
 	}
 
 	private static final class Rule {
@@ -545,6 +759,20 @@ final class FusekiAuthorizationFilter implements Filter {
 	}
 
 	private static final class RuleSubject {
+		private String type;
+		private String value;
+		private String claim;
+	}
+
+	private static final class GraphTaggingRuleJson {
+		private String datasetRef;
+		private String expressionType;
+		private String tagPredicate;
+		private List<String> actions;
+		private List<GraphTaggingSubjectJson> subjects;
+	}
+
+	private static final class GraphTaggingSubjectJson {
 		private String type;
 		private String value;
 		private String claim;

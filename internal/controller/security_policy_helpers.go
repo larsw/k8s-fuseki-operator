@@ -16,9 +16,10 @@ type renderedSecurityPolicyBundle struct {
 }
 
 type renderedSecurityPolicy struct {
-	Name        string                       `json:"name"`
-	Description string                       `json:"description,omitempty"`
-	Rules       []renderedSecurityPolicyRule `json:"rules"`
+	Name         string                            `json:"name"`
+	Description  string                            `json:"description,omitempty"`
+	Rules        []renderedSecurityPolicyRule      `json:"rules"`
+	GraphTagging []renderedGraphSecurityTaggingRule `json:"graphTagging,omitempty"`
 }
 
 type renderedSecurityPolicyRule struct {
@@ -28,6 +29,14 @@ type renderedSecurityPolicyRule struct {
 	ExpressionType string                      `json:"expressionType"`
 	Expression     string                      `json:"expression"`
 	Subjects       []renderedSecuritySubject   `json:"subjects"`
+}
+
+type renderedGraphSecurityTaggingRule struct {
+	DatasetRef     string                    `json:"datasetRef"`
+	ExpressionType string                    `json:"expressionType"`
+	TagPredicate   string                    `json:"tagPredicate,omitempty"`
+	Actions        []string                  `json:"actions"`
+	Subjects       []renderedSecuritySubject `json:"subjects"`
 }
 
 type renderedDatasetAccessTarget struct {
@@ -106,6 +115,27 @@ func renderDatasetSecurityPolicyBundle(policies []fusekiv1alpha1.SecurityPolicy)
 				Subjects:       subjects,
 			})
 		}
+		for _, tag := range policy.Spec.GraphTagging {
+			actions := make([]string, 0, len(tag.Actions))
+			for _, action := range tag.Actions {
+				actions = append(actions, string(action))
+			}
+			subjects := make([]renderedSecuritySubject, 0, len(tag.Subjects))
+			for _, subject := range tag.Subjects {
+				subjects = append(subjects, renderedSecuritySubject{
+					Type:  string(subject.Type),
+					Value: subject.Value,
+					Claim: subject.Claim,
+				})
+			}
+			rendered.GraphTagging = append(rendered.GraphTagging, renderedGraphSecurityTaggingRule{
+				DatasetRef:     tag.DatasetRef.Name,
+				ExpressionType: string(tag.ExpressionType),
+				TagPredicate:   tag.TagPredicate,
+				Actions:        actions,
+				Subjects:       subjects,
+			})
+		}
 		bundle.Policies = append(bundle.Policies, rendered)
 	}
 
@@ -139,6 +169,11 @@ func securityPolicyTargetsDataset(policy *fusekiv1alpha1.SecurityPolicy, dataset
 			return true
 		}
 	}
+	for _, tag := range policy.Spec.GraphTagging {
+		if tag.DatasetRef.Name == datasetName {
+			return true
+		}
+	}
 	return false
 }
 
@@ -147,10 +182,21 @@ func securityPolicyTargetDatasetNames(policy *fusekiv1alpha1.SecurityPolicy) []s
 		return nil
 	}
 
-	seen := make(map[string]struct{}, len(policy.Spec.Rules))
-	names := make([]string, 0, len(policy.Spec.Rules))
+	seen := make(map[string]struct{}, len(policy.Spec.Rules)+len(policy.Spec.GraphTagging))
+	names := make([]string, 0, len(policy.Spec.Rules)+len(policy.Spec.GraphTagging))
 	for _, rule := range policy.Spec.Rules {
 		name := rule.Target.DatasetRef.Name
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	for _, tag := range policy.Spec.GraphTagging {
+		name := tag.DatasetRef.Name
 		if name == "" {
 			continue
 		}
