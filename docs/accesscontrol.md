@@ -25,6 +25,7 @@ Current `SecurityProfile` fields include:
 - `tlsSecretRef`
 - `oidc.issuerURL`
 - `oidc.clientID`
+- `oidc.tlsCASecretRef`
 - `authorization.mode`
 - `authorization.ranger.*`
 
@@ -34,13 +35,25 @@ The reconciler projects the profile into a ConfigMap and mounts or injects the r
 
 `SecurityPolicy` expresses dataset-level authorization rules. A `Dataset` attaches policies through `spec.securityPolicies`.
 
-A policy rule includes:
+A `SecurityPolicy` has two mutually-independent ways to express authorization rules. At least one must be present.
+
+#### Static rules (`spec.rules`)
+
+Each rule statically enumerates a target and specifies how access is controlled:
 
 - a dataset target, optionally narrowed to a named graph
 - a set of subjects
 - a set of actions
 - an allow or deny effect
 - an expression type and expression string
+
+#### Dynamic graph tagging (`spec.graphTagging`)
+
+Each entry defines dataset-scoped, RDF*-based dynamic authorization. Instead of naming specific graphs in the manifest, the security expression is embedded directly on each named graph as an RDF* annotation. At request time the runtime reads the expression from the graph node, evaluates it against the requesting subject's authorizations, and allows or denies access accordingly.
+
+This is useful when named graphs are created dynamically and should inherit their access control from metadata embedded in the data itself.
+
+See [Dynamic Graph Security via RDF* Tagging](#dynamic-graph-security-via-rdf-tagging) for full details.
 
 Current subject types:
 
@@ -50,13 +63,13 @@ Current subject types:
 
 Current actions:
 
-- `Query`
-- `Update`
-- `Read`
-- `Write`
-- `Admin`
+- `Query` — SPARQL query endpoint
+- `Update` — SPARQL update endpoint
+- `Read` — Graph Store Protocol GET
+- `Write` — Graph Store Protocol PUT / POST / PATCH / DELETE
+- `Admin` — administrative dataset operations
 
-Current effects:
+Current effects (static rules only):
 
 - `Allow`
 - `Deny`
@@ -151,6 +164,36 @@ What the operator does not do:
 
 Treat the operator as the place where Fuseki-side OIDC metadata is wired, not the place where the IdP itself is administered.
 
+#### OIDC Provider TLS Trust Anchor
+
+If your OIDC provider uses a certificate issued by a private or internal CA that is not in the standard trust store of the Fuseki image, you can reference the root certificate directly on the `SecurityProfile`:
+
+```yaml
+spec:
+  oidc:
+    issuerURL: https://idp.internal.example.com/realms/fuseki
+    clientID: fuseki-ui
+    tlsCASecretRef:
+      name: oidc-ca-cert
+      key: ca.crt
+```
+
+The referenced secret key must contain a PEM-encoded certificate (or certificate chain) that serves as the trust anchor for verifying the OIDC provider's TLS endpoints. The operator mounts or injects this material into the Fuseki runtime so that OIDC discovery and token-validation requests succeed against the private CA.
+
+Recommended secret shape:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oidc-ca-cert
+  namespace: default
+data:
+  ca.crt: <base64-encoded PEM certificate>
+```
+
+The `optional` field on `tlsCASecretRef` controls whether the operator treats a missing secret as a hard failure. When omitted or `false`, the profile will not become `Ready` until the secret exists.
+
 ## Authorization
 
 Two authorization modes are supported:
@@ -211,7 +254,7 @@ spec:
     - name: analysts-read
 ```
 
-#### Example: Local Security Policy
+#### Example: Local Security Policy — Static Rules
 
 ```yaml
 apiVersion: fuseki.apache.org/v1alpha1
@@ -236,6 +279,96 @@ spec:
       expressionType: Simple
       expression: PUBLIC
 ```
+
+## Dynamic Graph Security via RDF* Tagging
+
+In addition to static `rules`, a `SecurityPolicy` can use `spec.graphTagging` to define access control that is driven by security expressions embedded directly in the RDF graph data as RDF* annotations.
+
+### Motivation
+
+Static rules work well when the set of named graphs is known at deployment time. They break down when named graphs are created dynamically — for example by ingest pipelines — and each graph carries its own classification that must be enforced at query time.
+
+RDF* tagging solves this by annotating each named graph node with the security expression it requires:
+
+```turtle
+<< <https://example.com/graphs/project-x> a :SecuredGraph >>
+    <https://fuseki.apache.org/security#expression> "TopSecret&Project-X" .
+```
+
+The policy manifest then declares only *who* is governed by those annotations and *what operations* they affect — the runtime evaluates access per-graph based on the embedded expression.
+
+### API
+
+```yaml
+spec:
+  graphTagging:
+    - datasetRef:
+        name: sensitive-dataset
+      expressionType: Accumulo         # Simple or Accumulo
+      tagPredicate: "https://fuseki.apache.org/security#expression"  # optional default
+      actions:
+        - Query
+        - Read
+      subjects:
+        - type: Group
+          value: data-scientists
+        - type: OIDCClaim
+          claim: roles
+```
+
+`graphTagging` fields:
+
+| Field | Required | Description |
+|---|---|---|
+| `datasetRef` | yes | dataset whose named graphs carry RDF* annotations |
+| `expressionType` | no (default `Simple`) | expression dialect used in the annotations: `Simple` or `Accumulo` |
+| `tagPredicate` | no | RDF predicate used in RDF* annotations; defaults to `https://fuseki.apache.org/security#expression` |
+| `actions` | yes | dataset operations governed by the dynamic expressions |
+| `subjects` | yes | principals evaluated against the embedded expressions |
+
+### Combining Static Rules And Graph Tagging
+
+Static `rules` and `graphTagging` entries can coexist in the same `SecurityPolicy`. A policy may consist entirely of `graphTagging` entries with no static rules.
+
+Example combining both approaches:
+
+```yaml
+spec:
+  description: Static admin grant + dynamic per-graph classification
+  rules:
+    - target:
+        datasetRef:
+          name: sensitive-dataset
+      subjects:
+        - type: User
+          value: data-admin
+      actions:
+        - Query
+        - Update
+        - Read
+        - Write
+        - Admin
+      effect: Allow
+      expressionType: Simple
+      expression: "*"
+  graphTagging:
+    - datasetRef:
+        name: sensitive-dataset
+      expressionType: Accumulo
+      actions:
+        - Query
+        - Read
+      subjects:
+        - type: Group
+          value: analysts
+```
+
+### Expression Types In RDF* Annotations
+
+- **Simple**: plain label strings where `*` means unrestricted and `PUBLIC` means unauthenticated access is allowed
+- **Accumulo**: label-based visibility expressions following the Apache Accumulo syntax, e.g. `TopSecret&Project-X|(Unclassified&Public)`
+
+The `expressionType` on the `graphTagging` entry must match the dialect used in the RDF* annotations in the data.
 
 #### Example: Attach The Profile To A Cluster
 
@@ -455,6 +588,7 @@ Check:
 - all referenced `SecurityPolicy` objects exist
 - the `Dataset.spec.securityPolicies` names are correct
 - the cluster or server is not accidentally using a Ranger `SecurityProfile`
+- if using `graphTagging`, at least one `actions` and one `subjects` entry is present on each tagging rule
 
 ### Ranger Mode Fails
 
