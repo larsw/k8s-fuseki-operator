@@ -121,10 +121,41 @@ type SecurityPolicyRule struct {
 	Subjects       []SecuritySubject            `json:"subjects,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="size(self.rules) > 0",message="at least one rule is required"
+// GraphSecurityTaggingRule defines dynamic per-graph access control where security
+// expressions are embedded directly in the named graph data as RDF* annotations,
+// rather than declared statically in the policy manifest. For each named graph in
+// the target dataset, the operator reads the security expression from an RDF*
+// triple annotating the graph node and evaluates it against the authorizations of
+// the requesting subject.
+//
+// +kubebuilder:validation:XValidation:rule="self.datasetRef.name != \"\"",message="datasetRef.name is required"
+// +kubebuilder:validation:XValidation:rule="size(self.actions) > 0",message="at least one action is required"
+// +kubebuilder:validation:XValidation:rule="size(self.subjects) > 0",message="at least one subject is required"
+type GraphSecurityTaggingRule struct {
+	// DatasetRef references the dataset whose named graphs carry RDF* security annotations.
+	DatasetRef corev1.LocalObjectReference `json:"datasetRef"`
+	// ExpressionType is the security expression dialect embedded in the RDF* tags.
+	// Supported values are Simple and Accumulo.
+	// +kubebuilder:default=Simple
+	ExpressionType SecurityPolicyExpressionType `json:"expressionType,omitempty"`
+	// TagPredicate is the RDF predicate used in RDF* annotations to embed the security
+	// expression on a named graph. Defaults to <https://fuseki.apache.org/security#expression>
+	// if not specified.
+	TagPredicate string `json:"tagPredicate,omitempty"`
+	// Actions lists the dataset operations governed by the RDF*-embedded security expressions.
+	Actions []SecurityPolicyAction `json:"actions,omitempty"`
+	// Subjects lists the principals whose access to tagged graphs is evaluated against
+	// the RDF*-embedded security expressions.
+	Subjects []SecuritySubject `json:"subjects,omitempty"`
+}
+
+// +kubebuilder:validation:XValidation:rule="size(self.rules) > 0 || (has(self.graphTagging) && size(self.graphTagging) > 0)",message="at least one rule or graphTagging entry is required"
 type SecurityPolicySpec struct {
 	Description string               `json:"description,omitempty"`
-	Rules       []SecurityPolicyRule `json:"rules,omitempty"`
+	Rules        []SecurityPolicyRule         `json:"rules,omitempty"`
+	// GraphTagging defines dynamic per-graph security policies derived from RDF* annotations
+	// embedded in the graph data, rather than statically declared named-graph targets.
+	GraphTagging []GraphSecurityTaggingRule   `json:"graphTagging,omitempty"`
 }
 
 type SecurityPolicyStatus struct {

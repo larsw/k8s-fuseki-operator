@@ -125,10 +125,97 @@ spec:
                   - message: expression is required
                     rule: size(self.expression) > 0
                 type: array
+              graphTagging:
+                description: GraphTagging defines dynamic per-graph security policies
+                  derived from RDF* annotations embedded in the graph data, rather
+                  than statically declared named-graph targets.
+                items:
+                  description: GraphSecurityTaggingRule defines dynamic per-graph
+                    access control where security expressions are embedded directly
+                    in the named graph data as RDF* annotations.
+                  properties:
+                    actions:
+                      description: Actions lists the dataset operations governed by
+                        the RDF*-embedded security expressions.
+                      items:
+                        enum:
+                        - Query
+                        - Update
+                        - Read
+                        - Write
+                        - Admin
+                        type: string
+                      type: array
+                    datasetRef:
+                      description: DatasetRef references the dataset whose named graphs
+                        carry RDF* security annotations.
+                      properties:
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                      type: object
+                      x-kubernetes-map-type: atomic
+                    expressionType:
+                      default: Simple
+                      description: ExpressionType is the security expression dialect
+                        embedded in the RDF* tags. Supported values are Simple and
+                        Accumulo.
+                      enum:
+                      - Simple
+                      - Accumulo
+                      type: string
+                    subjects:
+                      description: Subjects lists the principals whose access to tagged
+                        graphs is evaluated against the RDF*-embedded security expressions.
+                      items:
+                        properties:
+                          claim:
+                            type: string
+                          type:
+                            enum:
+                            - User
+                            - Group
+                            - OIDCClaim
+                            type: string
+                          value:
+                            type: string
+                        required:
+                        - type
+                        type: object
+                        x-kubernetes-validations:
+                        - message: claim is required for OIDCClaim subjects
+                          rule: self.type != 'OIDCClaim' || size(self.claim) > 0
+                        - message: value is required for non-OIDCClaim subjects
+                          rule: self.type == 'OIDCClaim' || size(self.value) > 0
+                      type: array
+                    tagPredicate:
+                      description: TagPredicate is the RDF predicate used in RDF*
+                        annotations to embed the security expression on a named graph.
+                        Defaults to <https://fuseki.apache.org/security#expression>
+                        if not specified.
+                      type: string
+                  required:
+                  - datasetRef
+                  type: object
+                  x-kubernetes-validations:
+                  - message: datasetRef.name is required
+                    rule: self.datasetRef.name != ''
+                  - message: at least one action is required
+                    rule: size(self.actions) > 0
+                  - message: at least one subject is required
+                    rule: size(self.subjects) > 0
+                type: array
             type: object
             x-kubernetes-validations:
-            - message: at least one rule is required
-              rule: size(self.rules) > 0
+            - message: at least one rule or graphTagging entry is required
+              rule: size(self.rules) > 0 || (has(self.graphTagging) && size(self.graphTagging)
+                > 0)
           status:
             properties:
               conditions:
