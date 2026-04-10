@@ -403,8 +403,11 @@ type FusekiUIList struct {
 }
 
 type SecurityOIDCSpec struct {
-	IssuerURL string `json:"issuerURL,omitempty"`
-	ClientID  string `json:"clientID,omitempty"`
+	IssuerURL    string                      `json:"issuerURL,omitempty"`
+	ClientID     string                      `json:"clientID,omitempty"`
+	// TLSCASecretRef references a Secret key that contains the PEM-encoded root
+	// certificate (trust anchor) used to verify the OIDC provider's TLS certificate.
+	TLSCASecretRef *corev1.SecretKeySelector `json:"tlsCASecretRef,omitempty"`
 }
 
 type SecurityProfileSpec struct {
