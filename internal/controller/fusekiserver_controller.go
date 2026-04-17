@@ -205,7 +205,11 @@ func (r *FusekiServerReconciler) reconcileDeployment(ctx context.Context, server
 			deployment.Spec.Template.ObjectMeta.Annotations = mergeStringMaps(nil, server.Spec.Observability.Logging.PodAnnotations)
 		}
 		deployment.Spec.Template.Spec.TerminationGracePeriodSeconds = ptrTo(int64(30))
-		deployment.Spec.Template.Spec.Containers = []corev1.Container{fusekiServerContainer(server, securityProfile, adminSecretRef)}
+		containers := []corev1.Container{fusekiServerContainer(server, securityProfile, adminSecretRef)}
+		if opaSidecar := fusekiOPASidecarContainer(securityProfile); opaSidecar != nil {
+			containers = append(containers, *opaSidecar)
+		}
+		deployment.Spec.Template.Spec.Containers = containers
 		volumes := []corev1.Volume{
 			{
 				Name:         fusekiConfigVolumeName,

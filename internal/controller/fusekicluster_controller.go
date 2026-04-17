@@ -294,7 +294,11 @@ func (r *FusekiClusterReconciler) reconcileStatefulSet(ctx context.Context, clus
 			statefulSet.Spec.Template.Spec.Affinity = cluster.Spec.Affinity.DeepCopy()
 		}
 		statefulSet.Spec.Template.Spec.TerminationGracePeriodSeconds = ptrTo(int64(30))
-		statefulSet.Spec.Template.Spec.Containers = []corev1.Container{fusekiContainer(cluster, securityProfile, adminSecretRef)}
+		containers := []corev1.Container{fusekiContainer(cluster, securityProfile, adminSecretRef)}
+		if opaSidecar := fusekiOPASidecarContainer(securityProfile); opaSidecar != nil {
+			containers = append(containers, *opaSidecar)
+		}
+		statefulSet.Spec.Template.Spec.Containers = containers
 		volumes := []corev1.Volume{
 			{
 				Name:         fusekiConfigVolumeName,

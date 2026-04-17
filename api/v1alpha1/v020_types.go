@@ -5,21 +5,77 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// +kubebuilder:validation:Enum=Local;Ranger
+// +kubebuilder:validation:Enum=Local;Ranger;OPA
 type AuthorizationMode string
 
 const (
 	AuthorizationModeLocal  AuthorizationMode = "Local"
 	AuthorizationModeRanger AuthorizationMode = "Ranger"
+	AuthorizationModeOPA    AuthorizationMode = "OPA"
 )
 
 // +kubebuilder:validation:XValidation:rule="self.mode != 'Ranger' || has(self.ranger)",message="ranger settings are required when authorization mode is Ranger"
 // +kubebuilder:validation:XValidation:rule="self.mode != 'Local' || !has(self.ranger)",message="ranger settings are only supported in Ranger mode"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'OPA' || has(self.opa)",message="opa settings are required when authorization mode is OPA"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'OPA' || !has(self.opa)",message="opa settings are only supported in OPA mode"
 type SecurityAuthorizationSpec struct {
 	// +kubebuilder:default=Local
 	Mode AuthorizationMode `json:"mode,omitempty"`
 
 	Ranger *RangerAuthorizationSpec `json:"ranger,omitempty"`
+	OPA    *OpaAuthorizationSpec    `json:"opa,omitempty"`
+}
+
+type OpaDecisionLogSpec struct {
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Console enables logging OPA decisions to stderr.
+	// +kubebuilder:default=false
+	Console bool `json:"console,omitempty"`
+
+	// RemoteURL is the endpoint OPA should ship decision logs to.
+	// +kubebuilder:validation:Pattern=`^https?://.+`
+	RemoteURL string `json:"remoteURL,omitempty"`
+
+	// RemoteSecretRef references a Secret with a "token" key used to authenticate
+	// to the remote decision log sink.
+	RemoteSecretRef *corev1.LocalObjectReference `json:"remoteSecretRef,omitempty"`
+}
+
+// +kubebuilder:validation:XValidation:rule="size(self.policyPackage) > 0",message="policyPackage is required"
+type OpaAuthorizationSpec struct {
+	// URL of the OPA REST API.  When omitted the operator injects an OPA sidecar
+	// and defaults to http://localhost:8181.
+	// +kubebuilder:validation:Pattern=`^https?://.+`
+	URL string `json:"url,omitempty"`
+
+	// PolicyPackage is the Rego package path for the authorization decision,
+	// e.g. "fuseki/authz".
+	// +kubebuilder:validation:MinLength=1
+	PolicyPackage string `json:"policyPackage"`
+
+	// BundleURL is an OPA bundle server URL for pulling policy/data bundles.
+	// +kubebuilder:validation:Pattern=`^https?://.+`
+	BundleURL string `json:"bundleURL,omitempty"`
+
+	// BundleSecretRef references a Secret with a "token" key used to authenticate
+	// to the bundle server.
+	BundleSecretRef *corev1.LocalObjectReference `json:"bundleSecretRef,omitempty"`
+
+	// Image overrides the OPA container image used for the injected sidecar.
+	Image string `json:"image,omitempty"`
+
+	// CacheTTL is how long the filter caches OPA authorization decisions.
+	// +kubebuilder:default="5s"
+	CacheTTL metav1.Duration `json:"cacheTTL,omitempty"`
+
+	// FailClosed controls whether requests are denied when OPA is unreachable.
+	// +kubebuilder:default=true
+	FailClosed bool `json:"failClosed,omitempty"`
+
+	// DecisionLog configures OPA decision logging.
+	DecisionLog *OpaDecisionLogSpec `json:"decisionLog,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.authSecretRef) && self.authSecretRef.name != ”",message="authSecretRef is required for Ranger authorization"
@@ -152,10 +208,10 @@ type GraphSecurityTaggingRule struct {
 // +kubebuilder:validation:XValidation:rule="size(self.rules) > 0 || (has(self.graphTagging) && size(self.graphTagging) > 0)",message="at least one rule or graphTagging entry is required"
 type SecurityPolicySpec struct {
 	Description string               `json:"description,omitempty"`
-	Rules        []SecurityPolicyRule         `json:"rules,omitempty"`
+	Rules       []SecurityPolicyRule `json:"rules,omitempty"`
 	// GraphTagging defines dynamic per-graph security policies derived from RDF* annotations
 	// embedded in the graph data, rather than statically declared named-graph targets.
-	GraphTagging []GraphSecurityTaggingRule   `json:"graphTagging,omitempty"`
+	GraphTagging []GraphSecurityTaggingRule `json:"graphTagging,omitempty"`
 }
 
 type SecurityPolicyStatus struct {
@@ -437,6 +493,44 @@ func (in *SecurityProfile) DesiredAuthorizationMode() AuthorizationMode {
 
 func (in *SecurityProfile) RangerAuthorizationEnabled() bool {
 	return in.DesiredAuthorizationMode() == AuthorizationModeRanger && in.Spec.Authorization != nil && in.Spec.Authorization.Ranger != nil
+}
+
+func (in *SecurityProfile) OPAAuthorizationEnabled() bool {
+	return in.DesiredAuthorizationMode() == AuthorizationModeOPA && in.Spec.Authorization != nil && in.Spec.Authorization.OPA != nil
+}
+
+func (in *SecurityProfile) DesiredOPAURL() string {
+	if !in.OPAAuthorizationEnabled() {
+		return ""
+	}
+	if in.Spec.Authorization.OPA.URL != "" {
+		return in.Spec.Authorization.OPA.URL
+	}
+	return "http://localhost:8181"
+}
+
+func (in *SecurityProfile) OPASidecarRequired() bool {
+	return in.OPAAuthorizationEnabled() && in.Spec.Authorization.OPA.URL == ""
+}
+
+func (in *SecurityProfile) DesiredOPAImage() string {
+	if !in.OPAAuthorizationEnabled() {
+		return ""
+	}
+	if in.Spec.Authorization.OPA.Image != "" {
+		return in.Spec.Authorization.OPA.Image
+	}
+	return "openpolicyagent/opa:latest-static"
+}
+
+func (in *SecurityProfile) DesiredOPACacheTTL() string {
+	if !in.OPAAuthorizationEnabled() {
+		return "5s"
+	}
+	if in.Spec.Authorization.OPA.CacheTTL.Duration > 0 {
+		return in.Spec.Authorization.OPA.CacheTTL.Duration.String()
+	}
+	return "5s"
 }
 
 func (in *SecurityPolicyRule) DesiredEffect() SecurityPolicyEffect {

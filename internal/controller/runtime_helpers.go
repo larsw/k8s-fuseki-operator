@@ -281,6 +281,27 @@ func renderSecurityProfileConfigData(profile *fusekiv1alpha1.SecurityProfile) ma
 			properties = append(properties, "ranger.authSecretRef="+profile.Spec.Authorization.Ranger.AuthSecretRef.Name)
 		}
 	}
+	if profile.OPAAuthorizationEnabled() {
+		opa := profile.Spec.Authorization.OPA
+		properties = append(properties,
+			"opa.url="+profile.DesiredOPAURL(),
+			"opa.policyPackage="+opa.PolicyPackage,
+			"opa.cacheTTL="+profile.DesiredOPACacheTTL(),
+			fmt.Sprintf("opa.failClosed=%v", opa.FailClosed),
+		)
+		if opa.BundleURL != "" {
+			properties = append(properties, "opa.bundleURL="+opa.BundleURL)
+		}
+		if opa.DecisionLog != nil && opa.DecisionLog.Enabled {
+			properties = append(properties, "opa.decisionLog.enabled=true")
+			if opa.DecisionLog.Console {
+				properties = append(properties, "opa.decisionLog.console=true")
+			}
+			if opa.DecisionLog.RemoteURL != "" {
+				properties = append(properties, "opa.decisionLog.remoteURL="+opa.DecisionLog.RemoteURL)
+			}
+		}
+	}
 	sort.Strings(properties)
 
 	return map[string]string{
@@ -337,6 +358,49 @@ func fusekiSecurityEnvVars(profile *fusekiv1alpha1.SecurityProfile) []corev1.Env
 					}},
 				},
 			)
+		}
+	}
+	if profile.OPAAuthorizationEnabled() {
+		opa := profile.Spec.Authorization.OPA
+		env = append(env,
+			corev1.EnvVar{Name: "SECURITY_PROFILE_OPA_URL", Value: profile.DesiredOPAURL()},
+			corev1.EnvVar{Name: "SECURITY_PROFILE_OPA_POLICY_PACKAGE", Value: opa.PolicyPackage},
+			corev1.EnvVar{Name: "SECURITY_PROFILE_OPA_CACHE_TTL", Value: profile.DesiredOPACacheTTL()},
+			corev1.EnvVar{Name: "SECURITY_PROFILE_OPA_FAIL_CLOSED", Value: fmt.Sprintf("%v", opa.FailClosed)},
+		)
+		if opa.BundleURL != "" {
+			env = append(env, corev1.EnvVar{Name: "SECURITY_PROFILE_OPA_BUNDLE_URL", Value: opa.BundleURL})
+		}
+		if opa.DecisionLog != nil && opa.DecisionLog.Enabled {
+			env = append(env, corev1.EnvVar{Name: "SECURITY_PROFILE_OPA_DECISION_LOG_ENABLED", Value: "true"})
+			if opa.DecisionLog.Console {
+				env = append(env, corev1.EnvVar{Name: "SECURITY_PROFILE_OPA_DECISION_LOG_CONSOLE", Value: "true"})
+			}
+			if opa.DecisionLog.RemoteURL != "" {
+				env = append(env, corev1.EnvVar{Name: "SECURITY_PROFILE_OPA_DECISION_LOG_REMOTE_URL", Value: opa.DecisionLog.RemoteURL})
+			}
+			if opa.DecisionLog.RemoteSecretRef != nil && opa.DecisionLog.RemoteSecretRef.Name != "" {
+				optional := true
+				env = append(env, corev1.EnvVar{
+					Name: "SECURITY_PROFILE_OPA_DECISION_LOG_TOKEN",
+					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: *opa.DecisionLog.RemoteSecretRef,
+						Key:                  "token",
+						Optional:             &optional,
+					}},
+				})
+			}
+		}
+		if opa.BundleSecretRef != nil && opa.BundleSecretRef.Name != "" {
+			optional := true
+			env = append(env, corev1.EnvVar{
+				Name: "SECURITY_PROFILE_OPA_BUNDLE_TOKEN",
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: *opa.BundleSecretRef,
+					Key:                  "token",
+					Optional:             &optional,
+				}},
+			})
 		}
 	}
 	if profile.Spec.TLSSecretRef != nil && profile.Spec.TLSSecretRef.Name != "" {
@@ -405,4 +469,86 @@ func fusekiSecurityTLSVolumeMount(profile *fusekiv1alpha1.SecurityProfile) *core
 	}
 
 	return &corev1.VolumeMount{Name: securityTLSVolumeName, MountPath: securityTLSMountPath, ReadOnly: true}
+}
+
+// fusekiOPASidecarContainer returns a sidecar container spec for OPA when the
+// SecurityProfile is configured for OPA mode and no external URL is provided.
+// Returns nil when a sidecar is not required.
+func fusekiOPASidecarContainer(profile *fusekiv1alpha1.SecurityProfile) *corev1.Container {
+	if profile == nil || !profile.OPASidecarRequired() {
+		return nil
+	}
+
+	opa := profile.Spec.Authorization.OPA
+	args := []string{
+		"run",
+		"--server",
+		"--addr=:8181",
+	}
+	if opa.BundleURL != "" {
+		args = append(args, "--bundle="+opa.BundleURL)
+	}
+	if opa.DecisionLog != nil && opa.DecisionLog.Enabled {
+		if opa.DecisionLog.Console {
+			args = append(args, "--set=decision_logs.console=true")
+		}
+		if opa.DecisionLog.RemoteURL != "" {
+			args = append(args, "--set=services.default.url="+opa.DecisionLog.RemoteURL)
+			args = append(args, "--set=decision_logs.service=default")
+		}
+	}
+
+	env := []corev1.EnvVar{}
+	if opa.BundleSecretRef != nil && opa.BundleSecretRef.Name != "" {
+		optional := true
+		env = append(env, corev1.EnvVar{
+			Name: "OPA_BUNDLE_TOKEN",
+			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: *opa.BundleSecretRef,
+				Key:                  "token",
+				Optional:             &optional,
+			}},
+		})
+	}
+	if opa.DecisionLog != nil && opa.DecisionLog.RemoteSecretRef != nil && opa.DecisionLog.RemoteSecretRef.Name != "" {
+		optional := true
+		env = append(env, corev1.EnvVar{
+			Name: "OPA_DECISION_LOG_TOKEN",
+			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: *opa.DecisionLog.RemoteSecretRef,
+				Key:                  "token",
+				Optional:             &optional,
+			}},
+		})
+	}
+
+	return &corev1.Container{
+		Name:  "opa",
+		Image: profile.DesiredOPAImage(),
+		Args:  args,
+		Env:   env,
+		Ports: []corev1.ContainerPort{{
+			Name:          "opa",
+			ContainerPort: 8181,
+			Protocol:      corev1.ProtocolTCP,
+		}},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+				Path:   "/health?plugins",
+				Port:   intstr.FromInt32(8181),
+				Scheme: corev1.URISchemeHTTP,
+			}},
+			PeriodSeconds:       5,
+			InitialDelaySeconds: 3,
+		},
+		LivenessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+				Path:   "/health",
+				Port:   intstr.FromInt32(8181),
+				Scheme: corev1.URISchemeHTTP,
+			}},
+			PeriodSeconds:       10,
+			InitialDelaySeconds: 5,
+		},
+	}
 }
